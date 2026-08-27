@@ -1,5 +1,5 @@
 {
-  "name": "@deepseek-ai/dsh-ui-balance",
+  "name": "dsh-ui-balance",
   "version": "0.1.0",
   "description": "Display DeepSeek API account balance under each assistant turn",
   "type": "module",
