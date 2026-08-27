@@ -23,9 +23,11 @@ dsh plugin --profile <name> add dsh-ui-balance
 
 ```yaml
 - insert:
-    - id: balance
+    - id: dsh-ui-balance
       name: 'dsh-ui-balance'
 ```
+
+> **`id` 别用通用词**（比如 `balance`）。`- insert:` 不去重：一旦与 dsh 自带 bundle 里某条条目同名，cordis loader 会抛 `duplicate loader entry id`，**内核直接退出**。dsh 自带的 id 里有大量 `git` / `session` / `settings` / `storage` 这类通用词，而且内核会自行更新到新版本 —— 撞车只是时间问题。直接拿包名当 id 最省事。
 
 重启 dsh 后，每条 AI 回复下方即出现余额行。
 
