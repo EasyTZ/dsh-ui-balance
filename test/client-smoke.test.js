@@ -1,12 +1,17 @@
 // 客户端半的冒烟测试：在 node 里伪造 window / React，真跑一遍 factory、apply()
-// 与两个槽组件的渲染路径。手法照抄 dsh-terminal-panel 的 test/client-smoke.test.js
+// 与三个槽组件的渲染路径。手法照抄 dsh-terminal-panel 的 test/client-smoke.test.js
 // （见其文件顶部注释的两条硬规矩：迷你 React 必须真的会渲染，effect 的 teardown
 // 不能在本轮就调）。
 //
-// 这个文件额外要守的一条是本插件特有的：`appSpendStore` 是模块级单例，
-// BalanceTail（写）和 BalanceSidebarInfo（读）之间隔着没有 props 传递的共享状态
-// ——纯逻辑单测覆盖不到「两个槽组件之间通过模块级 store 真的对上账」这件事，
-// 只有把两者都真的渲染一遍、检查渲染结果，才能证明这条线路是通的。
+// 这个文件额外要守的几条是本插件特有的：
+//   1. `costStore` 是模块级单例，`MessageCostProbe`（写）跟 `BalanceSidebarButton`
+//      / `BalanceDetailsPanel`（读）之间隔着没有 props 传递的共享状态——只有把
+//      它们都真的渲染一遍、检查渲染结果，才能证明这条线路是通的。
+//   2. 按当前选中模型分开计价、未配置单价的 model 不瞎猜——得真的喂两种
+//      selection 进去，看面板渲染出来的东西对不对。
+//   3. 高峰/空闲时段价格差一倍，而 `isPeakHours` 读的是真实系统时钟——测试要
+//      用 `withFixedNow` 把时间钉死，不然这个文件今天绿、高峰时段跑起来就可能
+//      变红（或者反过来，平时绿、一到高峰就红）。
 
 import assert from "node:assert";
 import fs from "node:fs";
@@ -33,32 +38,75 @@ function textOf(nodes) {
 	return nodes.map((n) => JSON.stringify((n.props && n.props.children) ?? null) ?? "").join("\n");
 }
 
-function fakePricing() {
-	return { currency: "CNY", cacheHitPerMillion: 0.5, cacheMissPerMillion: 2, outputPerMillion: 8 };
+/** 2026-09-05 是周六，北京时间全天都是空闲时段——用它当「确定不是高峰」的钉死时刻。 */
+const OFF_PEAK_ISO = "2026-09-05T02:00:00.000Z";
+/** 2026-09-01 周二北京时间 10:00，落在 9-12 高峰窗口内。 */
+const PEAK_ISO = "2026-09-01T02:00:00.000Z";
+
+/** 在固定的系统时间下运行 fn（连 `appOpenTime`、`turn.start.time` 的相对偏移都一致）。 */
+async function withFixedNow(iso, fn) {
+	const RealDate = Date;
+	const fixed = new RealDate(iso).getTime();
+	class FixedDate extends RealDate {
+		constructor(...args) {
+			if (args.length === 0) { super(fixed); return; }
+			super(...args);
+		}
+		static now() { return fixed; }
+	}
+	globalThis.Date = FixedDate;
+	try {
+		return await fn();
+	} finally {
+		globalThis.Date = RealDate;
+	}
 }
 
-function fakeFetch() {
-	return Promise.resolve({
-		ok: true,
-		json: async () => ({
+const PRICING = {
+	currency: "CNY",
+	peakMultiplier: 2,
+	modelPricing: {
+		"deepseek-official:deepseek-v4-flash": { cacheHitPerMillion: 0.05, cacheMissPerMillion: 1.5, outputPerMillion: 4.5 }
+	}
+};
+
+function fakeFetch(url) {
+	const u = String(url);
+	if (u.endsWith("/balance/pricing")) {
+		return Promise.resolve({ ok: true, json: async () => ({ ok: true, pricing: PRICING }) });
+	}
+	if (u.endsWith("/dsdesktop/balance")) {
+		return Promise.resolve({
 			ok: true,
-			value: { balance_infos: [{ currency: "CNY", total_balance: "12.34" }] },
-			pricing: fakePricing()
+			json: async () => ({ ok: true, value: { balance_infos: [{ currency: "CNY", total_balance: "12.34" }] }, pricing: PRICING })
+		});
+	}
+	return Promise.resolve({ ok: true, json: async () => ({ ok: false, error: { message: "unexpected " + u } }) });
+}
+
+/** 造一个够用的 modelDirectories：固定返回某个 selection（或 null 表示还没选过）。 */
+function fakeModelDirectories(selection) {
+	return {
+		directoryFor: () => ({
+			store: {
+				subscribe: () => () => {},
+				getSnapshot: () => ({ current: selection })
+			}
 		})
-	});
+	};
 }
 
 function loadModule() {
 	const src = fs.readFileSync(CLIENT, "utf8");
 	const registrations = [];
-	const docListeners = [];
 	Object.assign(globalThis, {
 		window: { __ModuleLoader__: { load: (reg) => registrations.push(reg) } },
 		document: {
 			querySelector: () => null,
 			createElement: () => ({ dataset: {}, style: {} }),
 			head: { appendChild() {} },
-			addEventListener: (type, fn) => docListeners.push({ type, fn })
+			addEventListener() {},
+			removeEventListener() {}
 		},
 		fetch: fakeFetch
 	});
@@ -70,9 +118,9 @@ function loadModule() {
 	};
 
 	// —— 一个够用的迷你 React ——
-	// 每次 __render() 都重置 cells：BalanceTail / BalanceSidebarInfo 是两棵完全
-	// 独立的组件树，共用同一份 cells 数组会把后一棵树的 hook 状态错读成前一棵的。
-	// 只在同一次 __render 内部的多轮收敛循环里，hook 状态才需要跨轮持久。
+	// 每次 __render() 都重置 cells：不同组件树共用同一份 cells 数组会把后一棵树
+	// 的 hook 状态错读成前一棵的。只在同一次 __render 内部的多轮收敛循环里，
+	// hook 状态才需要跨轮持久。
 	let cells = [];
 	let cursor = 0;
 	let dirty = false;
@@ -99,6 +147,20 @@ function loadModule() {
 		useEffect(fn, deps) { effects.push({ fn, deps }); },
 		useSyncExternalStore: (_sub, get) => get()
 	};
+	// 真 React 会继续往下渲染子组件；jsx() 只造一个 {type, props} 描述对象，
+	// 函数组件不会自己执行。之前这个文件漏了这一步，导致 ModelUsageRow /
+	// WalletIcon 这类嵌套组件从没真的跑过——断言能过纯粹是因为 JSON.stringify
+	// 顺带把 props（比如 entry.model 这个原始字符串）序列化了进去，不是因为
+	// 组件真的把它渲染成了看得见的节点。这里子组件都不含 hook，深度渲染在
+	// render() 之外单独调用是安全的（照抄 dsh-terminal-panel 同款写法）。
+	const deepRender = (node, depth = 0) => {
+		if (node === null || node === undefined || typeof node !== "object" || depth > 60) return node;
+		if (Array.isArray(node)) return node.map((child) => deepRender(child, depth + 1));
+		if (typeof node.type === "function") return deepRender(node.type(node.props), depth + 1);
+		const children = node.props && node.props.children;
+		if (children === undefined) return node;
+		return { ...node, props: { ...node.props, children: deepRender(children, depth + 1) } };
+	};
 	reactHooks.__render = async (render) => {
 		cells = [];
 		const teardowns = [];
@@ -107,7 +169,7 @@ function loadModule() {
 			cursor = 0;
 			dirty = false;
 			effects.length = 0;
-			last = render();
+			last = deepRender(render());
 			const seen = new Set();
 			for (const { fn } of effects) {
 				if (seen.has(fn)) continue;
@@ -143,6 +205,7 @@ function mount() {
 	const ctx = {
 		effect: (fn) => { fn(); return () => {}; },
 		locale: { register() {} },
+		get: () => void 0, // 默认没有 modelDirectories；需要的测试自己在 apply 之外注入
 		slots: {
 			inject: (key, cb) => { cb(); return () => {}; },
 			register: (o, comp) => { captured[o.name + ":" + o.id] = { opts: o, component: comp }; return () => {}; }
@@ -152,82 +215,196 @@ function mount() {
 	return { mod, captured, t: (k) => k };
 }
 
-test("冒烟：两个槽都注册到位，且分别真的渲染出内容", async () => {
+/** 造一个够用的 useSession：只支持 selector 形式，读固定的 nodes 数组。 */
+function fakeUseSession(nodes) {
+	return (selector) => selector({ nodes });
+}
+
+test("冒烟：三个槽都注册到位", async () => {
 	try {
-		const { mod, captured, t } = mount();
+		const { mod, captured } = mount();
 		assert.strictEqual(typeof mod.apply, "function");
 
-		const tailEntry = captured["conversation.chat.turnTail:balance"];
-		const sideEntry = captured["sidebar.footer.action:balance"];
-		assert.ok(tailEntry, "余额应注册进 conversation.chat.turnTail");
-		assert.ok(sideEntry, "余额应注册进 sidebar.footer.action");
-		assert.strictEqual(sideEntry.opts.order, 120);
-		assert.strictEqual(typeof tailEntry.component, "function");
-		assert.strictEqual(typeof sideEntry.component, "function");
+		const probe = captured["conversation.chat.turnTail:balance"];
+		const button = captured["sidebar.footer.action:balance"];
+		const panel = captured["shell.overlay:balance-panel"];
+		assert.ok(probe, "探针应注册进 conversation.chat.turnTail");
+		assert.ok(button, "入口按钮应注册进 sidebar.footer.action");
+		assert.ok(panel, "详情面板应注册进 shell.overlay");
+		assert.strictEqual(button.opts.order, 120);
+		assert.strictEqual(typeof probe.component, "function");
+		assert.strictEqual(typeof button.component, "function");
+		assert.strictEqual(typeof panel.component, "function");
 	} finally {
 		cleanup();
 	}
 });
 
-test("本次对话花费：token 用量按单价折算，渲染里能看到金额", async () => {
+test("探针不渲染任何东西，按当前选中模型算出花费", async () => {
+	await withFixedNow(OFF_PEAK_ISO, async () => {
+		try {
+			const { mod, captured, t } = mount();
+			const Probe = captured["conversation.chat.turnTail:balance"].component;
+			const Panel = captured["shell.overlay:balance-panel"].component;
+
+			const node = { kind: "assistant", seq: 1, usage: { inputTokens: 1000, outputTokens: 500, cacheReadTokens: 0 } };
+			const modelDirectories = fakeModelDirectories({ provider: "deepseek-official", model: "deepseek-v4-flash" });
+			const tree = await mod.__render(() => Probe({
+				sessionId: "s1", seq: 1, turn: { start: { time: Date.now() + 10 } },
+				useSession: fakeUseSession([node]), modelDirectories
+			}));
+			assert.strictEqual(tree, null, "探针不该渲染任何东西");
+
+			const panelTree = flatten(await mod.__render(() => Panel({ t, store: { subscribe: () => () => {}, getSnapshot: () => true, close() {} } })));
+			const text = textOf(panelTree);
+			// 空闲时段：(1000*1.5 + 500*4.5) / 1e6 = 0.00375，toFixed(4) 四舍五入成 0.0037
+			assert.ok(text.includes("0.0037"), `面板应显示折算出来的花费，实际:\n${text}`);
+
+			// 「用量」小节里，ModelUsageRow 真的把 model 名渲染进了一个可见节点——
+			// 不能只在整块 text 里搜子串：「目前单价」小节自己也会独立渲染同一个
+			// key，两边都不渲染时子串搜索一样会命中「误报」这条子串本身不来自
+			// ModelUsageRow，抓不出 ModelUsageRow 自己渲染错的 bug。
+			const usageTitleIdx = panelTree.findIndex((n) => n.props && n.props.children === "balance.usage.title");
+			assert.ok(usageTitleIdx >= 0, "应该能找到「用量」这个小节标题");
+			const usageLabelNode = panelTree.slice(usageTitleIdx + 1).find((n) => n.props && n.props.className === "dsbRowLabel");
+			assert.ok(usageLabelNode, "用量小节下面应该有一个 model 标签节点");
+			assert.strictEqual(usageLabelNode.props.children, "deepseek-official:deepseek-v4-flash", `用量小节应该显示完整的 provider:model，实际: ${usageLabelNode.props.children}`);
+		} finally {
+			cleanup();
+		}
+	});
+});
+
+test("高峰时段按 2 倍单价折算", async () => {
+	await withFixedNow(PEAK_ISO, async () => {
+		try {
+			const { mod, captured, t } = mount();
+			const Probe = captured["conversation.chat.turnTail:balance"].component;
+			const Panel = captured["shell.overlay:balance-panel"].component;
+
+			const node = { kind: "assistant", seq: 1, usage: { inputTokens: 1000, outputTokens: 500, cacheReadTokens: 0 } };
+			const modelDirectories = fakeModelDirectories({ provider: "deepseek-official", model: "deepseek-v4-flash" });
+			await mod.__render(() => Probe({
+				sessionId: "s1", seq: 1, turn: { start: { time: Date.now() + 10 } },
+				useSession: fakeUseSession([node]), modelDirectories
+			}));
+
+			const panelTree = flatten(await mod.__render(() => Panel({ t, store: { subscribe: () => () => {}, getSnapshot: () => true, close() {} } })));
+			const text = textOf(panelTree);
+			// 高峰：空闲价 0.00375 的 2 倍 = 0.0075（这个刚好不落在四舍五入的边界上）
+			assert.ok(text.includes("0.0075"), `高峰时段应该是空闲时段的 2 倍，实际:\n${text}`);
+		} finally {
+			cleanup();
+		}
+	});
+});
+
+test("没配置单价的 model（或还没选过模型）只显示用量、不计费，且不会跟别的 model 混在一起", async () => {
+	await withFixedNow(OFF_PEAK_ISO, async () => {
+		try {
+			const { mod, captured, t } = mount();
+			const Probe = captured["conversation.chat.turnTail:balance"].component;
+			const Panel = captured["shell.overlay:balance-panel"].component;
+
+			const priced = { kind: "assistant", seq: 1, usage: { inputTokens: 1000, outputTokens: 500, cacheReadTokens: 0 } };
+			const unpriced = { kind: "assistant", seq: 2, usage: { inputTokens: 999, outputTokens: 999, cacheReadTokens: 0 } };
+
+			await mod.__render(() => Probe({
+				sessionId: "s1", seq: 1, turn: { start: { time: Date.now() + 10 } },
+				useSession: fakeUseSession([priced, unpriced]),
+				modelDirectories: fakeModelDirectories({ provider: "deepseek-official", model: "deepseek-v4-flash" })
+			}));
+			await mod.__render(() => Probe({
+				sessionId: "s1", seq: 2, turn: { start: { time: Date.now() + 10 } },
+				useSession: fakeUseSession([priced, unpriced]),
+				modelDirectories: fakeModelDirectories({ provider: "some-other", model: "some-model" })
+			}));
+
+			const panelTree = flatten(await mod.__render(() => Panel({ t, store: { subscribe: () => () => {}, getSnapshot: () => true, close() {} } })));
+			const text = textOf(panelTree);
+			assert.ok(text.includes("0.0037"), `已配置单价的部分应正常计费，实际:\n${text}`);
+			assert.ok(text.includes("some-model"), `未配置单价的 model 也该显示用量，实际:\n${text}`);
+			assert.ok(text.includes("balance.cost.unpriced"), `应提示这部分用量没计入花费，实际:\n${text}`);
+
+			// `flatten`+`textOf` 是把每个节点自己的 children 各自 JSON.stringify 一遍，
+			// 父节点的那一行天然包含子树的完整内容——直接在拼起来的大文本里找子串
+			// 位置不可靠。要验证「花费金额具体是多少」就该直接找到那个 .dsbRowValue
+			// 节点，看它自己的文本。
+			const costTitleIdx = panelTree.findIndex((n) => n.props && n.props.children === "balance.cost.title");
+			assert.ok(costTitleIdx >= 0, "应该能找到「花费」这个小节标题");
+			const costValueNode = panelTree.slice(costTitleIdx + 1).find((n) => n.props && n.props.className === "dsbRowValue");
+			assert.ok(costValueNode, "花费小节下面应该有一个金额节点");
+			assert.strictEqual(costValueNode.props.children, "CNY 0.0037", `花费金额只该是 priced 那条算出来的数，不该把 unpriced 的用量也折算进来，实际: ${costValueNode.props.children}`);
+		} finally {
+			cleanup();
+		}
+	});
+});
+
+test("历史消息（turn.start.time 早于本次启动）不计入，同一条消息不会重复计费", async () => {
+	await withFixedNow(OFF_PEAK_ISO, async () => {
+		try {
+			const { mod, captured, t } = mount();
+			const Probe = captured["conversation.chat.turnTail:balance"].component;
+			const Panel = captured["shell.overlay:balance-panel"].component;
+			const modelDirectories = fakeModelDirectories({ provider: "deepseek-official", model: "deepseek-v4-flash" });
+
+			const historicalNode = { kind: "assistant", seq: 1, usage: { inputTokens: 100000, outputTokens: 50000, cacheReadTokens: 0 } };
+			await mod.__render(() => Probe({
+				sessionId: "sOld", seq: 1, turn: { start: { time: Date.now() - 100000 } },
+				useSession: fakeUseSession([historicalNode]), modelDirectories
+			}));
+			let panelTree = flatten(await mod.__render(() => Panel({ t, store: { subscribe: () => () => {}, getSnapshot: () => true, close() {} } })));
+			assert.ok(textOf(panelTree).includes("balance.usage.empty"), `历史消息不该计入，实际:\n${textOf(panelTree)}`);
+
+			const freshNode = { kind: "assistant", seq: 2, usage: { inputTokens: 1000, outputTokens: 500, cacheReadTokens: 0 } };
+			// 同一条消息的探针「挂载」两次（模拟组件因为别的原因重渲染），不该重复计费。
+			await mod.__render(() => Probe({ sessionId: "sNew", seq: 2, turn: { start: { time: Date.now() + 10 } }, useSession: fakeUseSession([freshNode]), modelDirectories }));
+			await mod.__render(() => Probe({ sessionId: "sNew", seq: 2, turn: { start: { time: Date.now() + 10 } }, useSession: fakeUseSession([freshNode]), modelDirectories }));
+
+			panelTree = flatten(await mod.__render(() => Panel({ t, store: { subscribe: () => () => {}, getSnapshot: () => true, close() {} } })));
+			const text = textOf(panelTree);
+			assert.ok(text.includes("0.0037"), `应只计入这一条新消息一次，实际:\n${text}`);
+		} finally {
+			cleanup();
+		}
+	});
+});
+
+test("点击侧边栏按钮会切换面板的开关 store（展开态）", async () => {
 	try {
 		const { mod, captured, t } = mount();
-		const TailComp = captured["conversation.chat.turnTail:balance"].component;
+		const Button = captured["sidebar.footer.action:balance"].component;
 
-		const usage = { uncachedInputTokens: 1000, outputTokens: 500, cacheReadTokens: 0, cacheWriteTokens: 0 };
-		const tree = flatten(await mod.__render(() => TailComp({
-			t,
-			sessionId: "s1",
-			useProjection: () => usage
-		})));
-
-		const text = textOf(tree);
-		assert.ok(text.includes("12.34"), "应渲染出余额数值");
-		// (1000*2 + 500*8) / 1e6 = 0.006
-		assert.ok(text.includes("0.006"), `应渲染出本次对话花费，实际:\n${text}`);
+		let toggled = false;
+		const store = { toggle: () => { toggled = true; } };
+		const tree = flatten(await mod.__render(() => Button({ wide: true, t, store })));
+		const btn = tree.find((n) => n.type === "button");
+		assert.ok(btn, "应渲染出一个可点击的按钮");
+		assert.strictEqual(btn.props.className, "dsbSideBtn", "展开态应该是那种没有框的纯文字按钮");
+		btn.props.onClick();
+		assert.strictEqual(toggled, true, "点击应调用 store.toggle()");
 	} finally {
 		cleanup();
 	}
 });
 
-test("本次打开共消费：按 Turn 时间戳分辨「历史」与「刚发生」，单轮新对话不漏算、旧会话历史不误算", async () => {
+test("折叠态（wide:false）只显示一个图标按钮，不显示整行文字", async () => {
 	try {
 		const { mod, captured, t } = mount();
-		const Tail = captured["conversation.chat.turnTail:balance"].component;
-		const Side = captured["sidebar.footer.action:balance"].component;
+		const Button = captured["sidebar.footer.action:balance"].component;
 
-		const historical = (offsetMs) => ({ start: { time: Date.now() - 100000 - offsetMs } });
-		const justNow = () => ({ start: { time: Date.now() + 10 } });
-
-		// 会话 sA：全新对话，只有一轮，turn.start.time 晚于 appOpenTime——没有任何
-		// 历史证据，必须全额计入，不能因为「第一次看到这个会话」就被当基线滤掉
-		// （单轮问答问完就关，是最常见的使用方式，漏算这个就是漏算大多数场景）。
-		// (1000*2 + 500*8)/1e6 = 0.006
-		await mod.__render(() => Tail({
-			t, sessionId: "sA", turn: justNow(),
-			useProjection: () => ({ uncachedInputTokens: 1000, outputTokens: 500, cacheReadTokens: 0, cacheWriteTokens: 0 })
-		}));
-		let side = flatten(await mod.__render(() => Side({ t, wide: true })));
-		assert.ok(textOf(side).includes("0.006"), `全新单轮对话应全额计入，实际:\n${textOf(side)}`);
-
-		// 会话 sB：重新打开一个老会话，历史上的两轮 turnTail 同时挂载（时间戳都早于
-		// appOpenTime），读到的是同一个当前累计值——应该被当基线滤掉，不计费，
-		// 且两次同值上报不能互相重复累加。
-		const oldUsage = () => ({ uncachedInputTokens: 100000, outputTokens: 50000, cacheReadTokens: 0, cacheWriteTokens: 0 });
-		await mod.__render(() => Tail({ t, sessionId: "sB", turn: historical(1000), useProjection: oldUsage }));
-		await mod.__render(() => Tail({ t, sessionId: "sB", turn: historical(2000), useProjection: oldUsage }));
-		side = flatten(await mod.__render(() => Side({ t, wide: true })));
-		assert.ok(textOf(side).includes("0.006") && !textOf(side).includes("0.606"), `翻旧会话的历史不该计费，实际:\n${textOf(side)}`);
-
-		// 同一个老会话 sB 现在收工了新的一轮（turn.start.time 晚于 appOpenTime），
-		// 增量才是这次启动期间真正花的钱：(1000*2+500*8)/1e6=0.006。
-		await mod.__render(() => Tail({
-			t, sessionId: "sB", turn: justNow(),
-			useProjection: () => ({ uncachedInputTokens: 101000, outputTokens: 50500, cacheReadTokens: 0, cacheWriteTokens: 0 })
-		}));
-		side = flatten(await mod.__render(() => Side({ t, wide: true })));
-		// 累计应为 sA 的 0.006 + sB 新一轮的 0.006 = 0.012
-		assert.ok(textOf(side).includes("0.012"), `旧会话的新一轮应按增量计入，累计应为 0.012，实际:\n${textOf(side)}`);
+		let toggled = false;
+		const store = { toggle: () => { toggled = true; } };
+		const tree = flatten(await mod.__render(() => Button({ wide: false, t, store })));
+		const btn = tree.find((n) => n.type === "button");
+		assert.ok(btn, "折叠态也应该渲染出一个可点击的按钮");
+		assert.strictEqual(btn.props.className, "dsbSideIcon", "折叠态应该是图标按钮，跟 Git/终端/市场折叠时一致");
+		// 图标按钮的 children 应该是一个 svg 节点，不是整行「余额 CNY xx」的文字——
+		// 之前就是因为折叠态还在渲染整行文字，把同一列里另外三个图标挤没了。
+		assert.strictEqual(btn.props.children.type, "svg", `折叠态不该渲染文字，应该是图标，实际 children: ${JSON.stringify(btn.props.children)}`);
+		btn.props.onClick();
+		assert.strictEqual(toggled, true, "折叠态点击也应该调用 store.toggle()");
 	} finally {
 		cleanup();
 	}

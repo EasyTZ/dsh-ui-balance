@@ -1,6 +1,6 @@
 {
   "name": "@easytz/dsh-ui-balance",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Display DeepSeek API account balance under each assistant turn",
   "type": "module",
   "main": "lib/index.js",
@@ -24,7 +24,8 @@
         "@deepseek-ai/dsh-client-locale",
         "@deepseek-ai/dsh-client-runtime",
         "@deepseek-ai/dsh-client-ui-conversation",
-        "@deepseek-ai/dsh-client-ui-sidebar"
+        "@deepseek-ai/dsh-client-ui-sidebar",
+        "@deepseek-ai/dsh-client-ui-model-selection"
       ]
     }
   },
