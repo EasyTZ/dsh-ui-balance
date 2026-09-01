@@ -96,6 +96,26 @@ function fakeModelDirectories(selection) {
 	};
 }
 
+/** 造一个可变的 modelDirectories：模拟模型目录晚于探针首报才加载完成。 */
+function fakeMutableModelDirectories(initialSelection) {
+	let snapshot = { current: initialSelection };
+	const listeners = new Set();
+	const store = {
+		subscribe: (fn) => {
+			listeners.add(fn);
+			return () => listeners.delete(fn);
+		},
+		getSnapshot: () => snapshot
+	};
+	return {
+		directoryFor: () => ({ store }),
+		setSelection(selection) {
+			snapshot = { current: selection };
+			listeners.forEach((fn) => fn());
+		}
+	};
+}
+
 function loadModule() {
 	const src = fs.readFileSync(CLIENT, "utf8");
 	const registrations = [];
@@ -335,6 +355,46 @@ test("没配置单价的 model（或还没选过模型）只显示用量、不�
 			const costValueNode = panelTree.slice(costTitleIdx + 1).find((n) => n.props && n.props.className === "dsbRowValue");
 			assert.ok(costValueNode, "花费小节下面应该有一个金额节点");
 			assert.strictEqual(costValueNode.props.children, "CNY 0.0037", `花费金额只该是 priced 那条算出来的数，不该把 unpriced 的用量也折算进来，实际: ${costValueNode.props.children}`);
+		} finally {
+			cleanup();
+		}
+	});
+});
+
+test("模型目录晚于探针首报加载完成时，同一条消息应从 unknown 迁移到真实模型并补记费用", async () => {
+	await withFixedNow(OFF_PEAK_ISO, async () => {
+		try {
+			const { mod, captured, t } = mount();
+			const Probe = captured["conversation.chat.turnTail:balance"].component;
+			const Panel = captured["shell.overlay:balance-panel"].component;
+
+			const node = { kind: "assistant", seq: 1, usage: { inputTokens: 1000, outputTokens: 500, cacheReadTokens: 0 } };
+			const modelDirectories = fakeMutableModelDirectories(null);
+
+			// 首报时模型目录还没加载出来，selection 为 null：先记成 unknown/未计价。
+			await mod.__render(() => Probe({
+				sessionId: "s1", seq: 1, turn: { start: { time: Date.now() + 10 } },
+				useSession: fakeUseSession([node]), modelDirectories
+			}));
+			let panelTree = flatten(await mod.__render(() => Panel({ t, store: { subscribe: () => () => {}, getSnapshot: () => true, close() {} } })));
+			let costTitleIdx = panelTree.findIndex((n) => n.props && n.props.children === "balance.cost.title");
+			let costValueNode = panelTree.slice(costTitleIdx + 1).find((n) => n.props && n.props.className === "dsbRowValue");
+			assert.strictEqual(costValueNode.props.children, "CNY 0.00", `模型目录未加载时不应计费，实际: ${costValueNode.props.children}`);
+
+			// 模型目录随后加载完成，同一条消息必须迁移到真实 model 并补记费用，不能因为
+			// accounted 去重而永远卡在 unknown/未计价。
+			modelDirectories.setSelection({ provider: "deepseek-official", model: "deepseek-v4-flash" });
+			await mod.__render(() => Probe({
+				sessionId: "s1", seq: 1, turn: { start: { time: Date.now() + 10 } },
+				useSession: fakeUseSession([node]), modelDirectories
+			}));
+
+			panelTree = flatten(await mod.__render(() => Panel({ t, store: { subscribe: () => () => {}, getSnapshot: () => true, close() {} } })));
+			const text = textOf(panelTree);
+			assert.ok(text.includes("0.0037"), `目录加载后应补记费用，实际:\n${text}`);
+			costTitleIdx = panelTree.findIndex((n) => n.props && n.props.children === "balance.cost.title");
+			costValueNode = panelTree.slice(costTitleIdx + 1).find((n) => n.props && n.props.className === "dsbRowValue");
+			assert.strictEqual(costValueNode.props.children, "CNY 0.0037", `补记后花费金额应为 0.0037，实际: ${costValueNode.props.children}`);
 		} finally {
 			cleanup();
 		}
