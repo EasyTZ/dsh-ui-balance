@@ -388,7 +388,7 @@ test("没配置单价的 model（或还没选过模型）只显示用量、不�
 			assert.ok(costTitleIdx >= 0, "应该能找到「花费」这个小节标题");
 			const costValueNode = panelTree.slice(costTitleIdx + 1).find((n) => n.props && n.props.className === "dsbRowValue");
 			assert.ok(costValueNode, "花费小节下面应该有一个金额节点");
-			assert.strictEqual(costValueNode.props.children, "CNY 0.0037", `花费金额只该是 priced 那条算出来的数，不该把 unpriced 的用量也折算进来，实际: ${costValueNode.props.children}`);
+			assert.strictEqual(costValueNode.props.children, "0.0037 元", `花费金额只该是 priced 那条算出来的数，不该把 unpriced 的用量也折算进来，实际: ${costValueNode.props.children}`);
 		} finally {
 			cleanup();
 		}
@@ -413,7 +413,7 @@ test("模型目录晚于探针首报加载完成时，同一条消息应从 unkn
 			let panelTree = flatten(await mod.__render(() => Panel({ t, store: { subscribe: () => () => {}, getSnapshot: () => true, close() {} } })));
 			let costTitleIdx = panelTree.findIndex((n) => n.props && n.props.children === "balance.cost.title");
 			let costValueNode = panelTree.slice(costTitleIdx + 1).find((n) => n.props && n.props.className === "dsbRowValue");
-			assert.strictEqual(costValueNode.props.children, "CNY 0.00", `模型目录未加载时不应计费，实际: ${costValueNode.props.children}`);
+			assert.strictEqual(costValueNode.props.children, "0.00 元", `模型目录未加载时不应计费，实际: ${costValueNode.props.children}`);
 
 			// 模型目录随后加载完成，同一条消息必须迁移到真实 model 并补记费用，不能因为
 			// accounted 去重而永远卡在 unknown/未计价。
@@ -429,7 +429,7 @@ test("模型目录晚于探针首报加载完成时，同一条消息应从 unkn
 			costTitleIdx = panelTree.findIndex((n) => n.props && n.props.children === "balance.cost.title");
 
 			costValueNode = panelTree.slice(costTitleIdx + 1).find((n) => n.props && n.props.className === "dsbRowValue");
-			assert.strictEqual(costValueNode.props.children, "CNY 0.0037", `补记后花费金额应为 0.0037，实际: ${costValueNode.props.children}`);
+			assert.strictEqual(costValueNode.props.children, "0.0037 元", `补记后花费金额应为 0.0037，实际: ${costValueNode.props.children}`);
 		} finally {
 			cleanup();
 		}
@@ -461,7 +461,7 @@ test("流式生成期间用 partial 估算花费并实时显示，消息完成�
 			let costTitleIdx = panelTree.findIndex((n) => n.props && n.props.children === "balance.cost.title");
 			let costValueNode = panelTree.slice(costTitleIdx + 1).find((n) => n.props && n.props.className === "dsbRowValue");
 			assert.ok(costValueNode, "花费小节下面应该有一个金额节点");
-			assert.strictEqual(costValueNode.props.children, "CNY 0.0045", `流式期间应显示已完成精确值 + 进行中估算值，实际: ${costValueNode.props.children}`);
+			assert.strictEqual(costValueNode.props.children, "0.0045 元", `流式期间应显示已完成精确值 + 进行中估算值，实际: ${costValueNode.props.children}`);
 			assert.ok(panelTree.some((n) => n.props && n.props.children === "balance.cost.live"), "流式期间应提示「含进行中消息的估算值」");
 
 			// 消息结束，turnTail 探针用精确 usage 结算：应清掉 live 估算，只剩精确值。
@@ -475,7 +475,7 @@ test("流式生成期间用 partial 估算花费并实时显示，消息完成�
 			panelTree = flatten(await mod.__render(() => Panel({ t, store: { subscribe: () => () => {}, getSnapshot: () => true, close() {} } })));
 			costTitleIdx = panelTree.findIndex((n) => n.props && n.props.children === "balance.cost.title");
 			costValueNode = panelTree.slice(costTitleIdx + 1).find((n) => n.props && n.props.className === "dsbRowValue");
-			assert.strictEqual(costValueNode.props.children, "CNY 0.0037", `完成后应回到精确值，实际: ${costValueNode.props.children}`);
+			assert.strictEqual(costValueNode.props.children, "0.0037 元", `完成后应回到精确值，实际: ${costValueNode.props.children}`);
 			assert.ok(!panelTree.some((n) => n.props && n.props.children === "balance.cost.live"), "完成后不应再显示「含进行中估算值」");
 		} finally {
 			cleanup();
@@ -510,7 +510,7 @@ test("对话报错时 partial 消失，流式估算会折进累计而不是清�
 			const costTitleIdx = panelTree.findIndex((n) => n.props && n.props.children === "balance.cost.title");
 			const costValueNode = panelTree.slice(costTitleIdx + 1).find((n) => n.props && n.props.className === "dsbRowValue");
 			assert.ok(costValueNode, "花费小节下面应该有一个金额节点");
-			assert.strictEqual(costValueNode.props.children, "CNY 0.0045", `报错后应保留流式估算而不是清零，实际: ${costValueNode.props.children}`);
+			assert.strictEqual(costValueNode.props.children, "0.0045 元", `报错后应保留流式估算而不是清零，实际: ${costValueNode.props.children}`);
 		} finally {
 			cleanup();
 		}
@@ -550,7 +550,7 @@ test("流式估算折进累计后，精确 usage 到账会替换估算而不是�
 			const costTitleIdx = panelTree.findIndex((n) => n.props && n.props.children === "balance.cost.title");
 			const costValueNode = panelTree.slice(costTitleIdx + 1).find((n) => n.props && n.props.className === "dsbRowValue");
 			assert.ok(costValueNode, "花费小节下面应该有一个金额节点");
-			assert.strictEqual(costValueNode.props.children, "CNY 0.0037", `精确 usage 应替换估算，实际: ${costValueNode.props.children}`);
+			assert.strictEqual(costValueNode.props.children, "0.0037 元", `精确 usage 应替换估算，实际: ${costValueNode.props.children}`);
 		} finally {
 			cleanup();
 		}
@@ -576,7 +576,7 @@ test("重载页面后花费从 sessionStorage 恢复，不会清零", async () =
 			const costTitleIdx = panelTree.findIndex((n) => n.props && n.props.children === "balance.cost.title");
 			const costValueNode = panelTree.slice(costTitleIdx + 1).find((n) => n.props && n.props.className === "dsbRowValue");
 			assert.ok(costValueNode, "花费小节下面应该有一个金额节点");
-			assert.strictEqual(costValueNode.props.children, "CNY 0.0037", `重载后应从 sessionStorage 恢复已累计花费，实际: ${costValueNode.props.children}`);
+			assert.strictEqual(costValueNode.props.children, "0.0037 元", `重载后应从 sessionStorage 恢复已累计花费，实际: ${costValueNode.props.children}`);
 		} finally {
 			cleanup();
 		}
@@ -685,8 +685,8 @@ test("展开态：余额与花费是分开的两段，中间由 CSS 撑出空隙
 			assert.ok(String(bal.props.children).includes("12.34"), `第一段要带上余额数字，实际: ${bal.props.children}`);
 
 			// 花费的算法必须跟面板里那一行同源：同样是 0.0037，不是另算一份。
-			assert.ok(String(costNode.props.children).includes("CNY 0.0037"),
-				`侧边栏花费应与面板同源（CNY 0.0037），实际: ${costNode.props.children}`);
+			assert.ok(String(costNode.props.children).includes("0.0037 元"),
+				`侧边栏花费应与面板同源（0.0037 元），实际: ${costNode.props.children}`);
 
 			// 可视标签用短的（「花费」），紧挨着「余额」就能读懂；title/aria 用完整
 			// 那句（「本次打开花费（预估）」）——悬浮提示没有那个上下文，而折叠成图标
@@ -701,79 +701,42 @@ test("展开态：余额与花费是分开的两段，中间由 CSS 撑出空隙
 	});
 });
 
-test("目前单价要带币种，数字不能把浮点误差原样摊出来", async () => {
+test("目前单价每行带单位，数字不能把浮点误差原样摊出来", async () => {
 	await withFixedNow(PEAK_ISO, async () => {
 		try {
 			const { mod, captured } = mount();
-			// 0.7 * 1.3 在浮点里是 0.9099999999999999 —— 专门挑这组数，
-			// 「加了单位」和「数字本身能看」是同一处显示的两半，缺一半都不算修好。
-			const pricing = {
-				currency: "USD",
-				peakMultiplier: 1.3,
-				modelPricing: { "deepseek-official:deepseek-v4-flash": { cacheHitPerMillion: 0.7, cacheMissPerMillion: 1.5, outputPerMillion: 4.5 } }
-			};
-			globalThis.fetch = (url) => (String(url).endsWith("/balance/pricing")
-				? Promise.resolve({ ok: true, json: async () => ({ ok: true, pricing }) })
-				: Promise.resolve({ ok: true, json: async () => ({ ok: true, value: { balance_infos: [] }, pricing }) }));
-
+			const pricing = { currency: "USD", peakMultiplier: 1.3, modelPricing: { "deepseek-official:deepseek-v4-flash": { cacheHitPerMillion: 0.7, cacheMissPerMillion: 1.5, outputPerMillion: 4.5 } } };
+			globalThis.fetch = (url) => (String(url).endsWith("/balance/pricing") ? Promise.resolve({ ok: true, json: async () => ({ ok: true, pricing }) }) : Promise.resolve({ ok: true, json: async () => ({ ok: true, value: { balance_infos: [] }, pricing }) }));
 			const Probe = captured["conversation.chat.turnTail:balance"].component;
 			const Panel = captured["shell.overlay:balance-panel"].component;
-			await mod.__render(() => Probe({
-				sessionId: "s1", seq: 1, turn: { start: { time: Date.now() + 10 } },
-				useSession: fakeUseSession([{ kind: "assistant", seq: 1, usage: { inputTokens: 1000, outputTokens: 500, cacheReadTokens: 0 } }]),
-				modelDirectories: fakeModelDirectories({ provider: "deepseek-official", model: "deepseek-v4-flash" })
-			}));
-
-			const t = tWith({
-				"balance.price.title": "单价（{currency} / 每百万 token，{period}）",
-				"balance.price.row": "命中 {hit} · 未命中 {miss} · 输出 {output}"
-			});
+			await mod.__render(() => Probe({ sessionId: "s1", seq: 1, turn: { start: { time: Date.now() + 10 } }, useSession: fakeUseSession([{ kind: "assistant", seq: 1, usage: { inputTokens: 1000, outputTokens: 500, cacheReadTokens: 0 } }]), modelDirectories: fakeModelDirectories({ provider: "deepseek-official", model: "deepseek-v4-flash" }) }));
+			const t = tWith({ "balance.price.title": "单价（{period}）", "balance.price.peak": "高峰时段", "balance.price.offpeak": "空闲时段", "balance.price.table.model": "模型", "balance.price.table.hit": "命中", "balance.price.table.miss": "未命中", "balance.price.table.output": "输出（每百万 token）" });
 			const tree = flatten(await mod.__render(() => Panel({ t, store: { subscribe: () => () => {}, getSnapshot: () => true, close() {} } })));
 			const text = textOf(tree);
-
-			// 「命中 0.91 · 未命中 1.95」这几个裸数字单看是人民币还是美元全靠猜，
-			// 币种在小节标题里说一次就够，不用在每行三个数上各贴一遍。
-			assert.ok(text.includes("单价（USD / 每百万 token"), `单价标题应带上币种，实际:\n${text}`);
-			assert.ok(text.includes("命中 0.91"), `0.7 × 1.3 应显示成 0.91，实际:\n${text}`);
-			assert.ok(!text.includes("0.9099999999999999"), `浮点误差不该原样摊到界面上，实际:\n${text}`);
-			assert.ok(text.includes("未命中 1.95") && text.includes("输出 5.85"), `另外两个单价也要按同一套格式化，实际:\n${text}`);
-		} finally {
-			cleanup();
-		}
+			assert.ok(text.includes("单价（高峰时段"));
+			assert.ok(text.includes("deepseek-official:deepseek-v4-flash"));
+			assert.ok(text.includes("0.91 美元"));
+			assert.ok(!text.includes("0.9099999999999999"));
+			assert.ok(text.includes("1.95 美元") && text.includes("5.85 美元"));
+		} finally { cleanup(); }
 	});
 });
-
-test("单价表没声明币种时，用不带币种的标题，而不是渲染出一个空槽", async () => {
+test("单价表没声明币种时，标题不渲染空币种槽，单价行单位留空", async () => {
 	await withFixedNow(OFF_PEAK_ISO, async () => {
 		try {
 			const { mod, captured } = mount();
-			// 老配置可能没有 currency 字段，而这时花费那边也还没记下任何币种。
 			const pricing = { peakMultiplier: 1, modelPricing: { "deepseek-official:deepseek-v4-flash": { cacheHitPerMillion: 0.5, cacheMissPerMillion: 2, outputPerMillion: 8 } } };
-			globalThis.fetch = (url) => (String(url).endsWith("/balance/pricing")
-				? Promise.resolve({ ok: true, json: async () => ({ ok: true, pricing }) })
-				: Promise.resolve({ ok: true, json: async () => ({ ok: true, value: { balance_infos: [] }, pricing }) }));
-
+			globalThis.fetch = (url) => (String(url).endsWith("/balance/pricing") ? Promise.resolve({ ok: true, json: async () => ({ ok: true, pricing }) }) : Promise.resolve({ ok: true, json: async () => ({ ok: true, value: { balance_infos: [] }, pricing }) }));
 			const Probe = captured["conversation.chat.turnTail:balance"].component;
 			const Panel = captured["shell.overlay:balance-panel"].component;
-			await mod.__render(() => Probe({
-				sessionId: "s1", seq: 1, turn: { start: { time: Date.now() + 10 } },
-				useSession: fakeUseSession([{ kind: "assistant", seq: 1, usage: { inputTokens: 1000, outputTokens: 500, cacheReadTokens: 0 } }]),
-				modelDirectories: fakeModelDirectories({ provider: "deepseek-official", model: "deepseek-v4-flash" })
-			}));
-
-			const t = tWith({
-				"balance.price.title": "单价（{currency} / 每百万 token，{period}）",
-				"balance.price.title_nocurrency": "单价（每百万 token，{period}）"
-			});
+			await mod.__render(() => Probe({ sessionId: "s1", seq: 1, turn: { start: { time: Date.now() + 10 } }, useSession: fakeUseSession([{ kind: "assistant", seq: 1, usage: { inputTokens: 1000, outputTokens: 500, cacheReadTokens: 0 } }]), modelDirectories: fakeModelDirectories({ provider: "deepseek-official", model: "deepseek-v4-flash" }) }));
+			const t = tWith({ "balance.price.title": "单价（{period}）", "balance.price.peak": "高峰时段", "balance.price.offpeak": "空闲时段", "balance.price.table.model": "模型", "balance.price.table.hit": "命中", "balance.price.table.miss": "未命中", "balance.price.table.output": "输出（每百万 token）" });
 			const text = textOf(flatten(await mod.__render(() => Panel({ t, store: { subscribe: () => () => {}, getSnapshot: () => true, close() {} } }))));
-			assert.ok(text.includes("单价（每百万 token"), `没有币种时应换用不带币种的标题，实际:\n${text}`);
-			assert.ok(!text.includes("（ / 每百万"), `不该留下一个空的币种槽，实际:\n${text}`);
-		} finally {
-			cleanup();
-		}
+			assert.ok(text.includes("单价（空闲时段"));
+			assert.ok(!text.includes("（ / 每百万"));
+		} finally { cleanup(); }
 	});
 });
-
 test("还没产生花费时显示 0 而不是「—」，且带上单价表的币种", async () => {
 	await withFixedNow(OFF_PEAK_ISO, async () => {
 		try {
@@ -786,14 +749,14 @@ test("还没产生花费时显示 0 而不是「—」，且带上单价表的�
 			const btnTree = flatten(await mod.__render(() => Button({ wide: true, t, store: { toggle() {} } })));
 			const costNode = btnTree.find((n) => n.props && n.props.className === "dsbSideCost");
 			assert.ok(costNode, "花费那一段应该在");
-			assert.strictEqual(costNode.props.children, "balance.cost.short CNY 0.00",
+			assert.strictEqual(costNode.props.children, "balance.cost.short 0.00 元",
 				`没花过钱时应显示 0（币种取自单价表），实际: ${costNode.props.children}`);
 
 			// 面板里那一行必须跟侧边栏同源，不能一个显示 0、另一个显示「—」。
 			const panelTree = flatten(await mod.__render(() => Panel({ t, store: { subscribe: () => () => {}, getSnapshot: () => true, close() {} } })));
 			const costTitleIdx = panelTree.findIndex((n) => n.props && n.props.children === "balance.cost.title");
 			const panelValue = panelTree.slice(costTitleIdx + 1).find((n) => n.props && n.props.className === "dsbRowValue");
-			assert.strictEqual(panelValue.props.children, "CNY 0.00",
+			assert.strictEqual(panelValue.props.children, "0.00 元",
 				`面板里那一行应与侧边栏同源，实际: ${panelValue.props.children}`);
 		} finally {
 			cleanup();
