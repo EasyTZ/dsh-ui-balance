@@ -239,20 +239,27 @@ function mount() {
 function fakeUseSession(nodes) {
 	return (selector) => selector({ nodes });
 }
+/** 造一个更完整的 useSession：可以同时读 nodes / partial / turnTimings。 */
+function fakeUseSessionSnapshot(snapshot) {
+	return (selector) => selector(snapshot);
+}
 
-test("冒烟：三个槽都注册到位", async () => {
+test("冒烟：四个槽都注册到位", async () => {
 	try {
 		const { mod, captured } = mount();
 		assert.strictEqual(typeof mod.apply, "function");
 
 		const probe = captured["conversation.chat.turnTail:balance"];
+		const liveProbe = captured["conversation.session.header.actions:balance-live"];
 		const button = captured["sidebar.footer.action:balance"];
 		const panel = captured["shell.overlay:balance-panel"];
 		assert.ok(probe, "探针应注册进 conversation.chat.turnTail");
+		assert.ok(liveProbe, "实时估算探针应注册进 conversation.session.header.actions");
 		assert.ok(button, "入口按钮应注册进 sidebar.footer.action");
 		assert.ok(panel, "详情面板应注册进 shell.overlay");
 		assert.strictEqual(button.opts.order, 120);
 		assert.strictEqual(typeof probe.component, "function");
+		assert.strictEqual(typeof liveProbe.component, "function");
 		assert.strictEqual(typeof button.component, "function");
 		assert.strictEqual(typeof panel.component, "function");
 	} finally {
@@ -393,6 +400,7 @@ test("模型目录晚于探针首报加载完成时，同一条消息应从 unkn
 			const text = textOf(panelTree);
 			assert.ok(text.includes("0.0037"), `目录加载后应补记费用，实际:\n${text}`);
 			costTitleIdx = panelTree.findIndex((n) => n.props && n.props.children === "balance.cost.title");
+
 			costValueNode = panelTree.slice(costTitleIdx + 1).find((n) => n.props && n.props.className === "dsbRowValue");
 			assert.strictEqual(costValueNode.props.children, "CNY 0.0037", `补记后花费金额应为 0.0037，实际: ${costValueNode.props.children}`);
 		} finally {
@@ -401,6 +409,52 @@ test("模型目录晚于探针首报加载完成时，同一条消息应从 unkn
 	});
 });
 
+
+test("流式生成期间用 partial 估算花费并实时显示，消息完成后按精确 usage 校正", async () => {
+	await withFixedNow(OFF_PEAK_ISO, async () => {
+		try {
+			const { mod, captured, t } = mount();
+			const LiveProbe = captured["conversation.session.header.actions:balance-live"].component;
+			const Probe = captured["conversation.chat.turnTail:balance"].component;
+			const Panel = captured["shell.overlay:balance-panel"].component;
+			const modelDirectories = fakeModelDirectories({ provider: "deepseek-official", model: "deepseek-v4-flash" });
+
+			// 1000 个 CJK 字符，按我们的启发式 = 1000 个输出 token。
+			// 空闲时段 1000 * 4.5 / 1e6 = 0.0045。
+			const partial = { turn: 7, step: 1, blocks: [{ kind: "text", text: "你".repeat(1000) }] };
+			const snapshot = { nodes: [], partial, turnTimings: undefined };
+			const tree = await mod.__render(() => LiveProbe({
+				sessionId: "s1",
+				useSession: fakeUseSessionSnapshot(snapshot),
+				modelDirectories
+			}));
+			assert.strictEqual(tree, null, "实时探针不该渲染任何东西");
+
+			let panelTree = flatten(await mod.__render(() => Panel({ t, store: { subscribe: () => () => {}, getSnapshot: () => true, close() {} } })));
+			let costTitleIdx = panelTree.findIndex((n) => n.props && n.props.children === "balance.cost.title");
+			let costValueNode = panelTree.slice(costTitleIdx + 1).find((n) => n.props && n.props.className === "dsbRowValue");
+			assert.ok(costValueNode, "花费小节下面应该有一个金额节点");
+			assert.strictEqual(costValueNode.props.children, "CNY 0.0045", `流式期间应显示已完成精确值 + 进行中估算值，实际: ${costValueNode.props.children}`);
+			assert.ok(panelTree.some((n) => n.props && n.props.children === "balance.cost.live"), "流式期间应提示「含进行中消息的估算值」");
+
+			// 消息结束，turnTail 探针用精确 usage 结算：应清掉 live 估算，只剩精确值。
+			// 精确用量：(1000*1.5 + 500*4.5) / 1e6 = 0.00375 -> 显示 0.0037。
+			const finalNode = { kind: "assistant", seq: 1, step: 1, usage: { inputTokens: 1000, outputTokens: 500, cacheReadTokens: 0 } };
+			await mod.__render(() => Probe({
+				sessionId: "s1", seq: 1, turn: { start: { time: Date.now() + 10 }, turn: 7 },
+				useSession: fakeUseSession([finalNode]), modelDirectories
+			}));
+
+			panelTree = flatten(await mod.__render(() => Panel({ t, store: { subscribe: () => () => {}, getSnapshot: () => true, close() {} } })));
+			costTitleIdx = panelTree.findIndex((n) => n.props && n.props.children === "balance.cost.title");
+			costValueNode = panelTree.slice(costTitleIdx + 1).find((n) => n.props && n.props.className === "dsbRowValue");
+			assert.strictEqual(costValueNode.props.children, "CNY 0.0037", `完成后应回到精确值，实际: ${costValueNode.props.children}`);
+			assert.ok(!panelTree.some((n) => n.props && n.props.children === "balance.cost.live"), "完成后不应再显示「含进行中估算值」");
+		} finally {
+			cleanup();
+		}
+	});
+});
 test("历史消息（turn.start.time 早于本次启动）不计入，同一条消息不会重复计费", async () => {
 	await withFixedNow(OFF_PEAK_ISO, async () => {
 		try {
@@ -468,4 +522,153 @@ test("折叠态（wide:false）只显示一个图标按钮，不显示整行文�
 	} finally {
 		cleanup();
 	}
+});
+
+/** t 的默认实现是「原样返回 key」，要验模板里的占位符有没有被填上就得给一份真模板。 */
+function tWith(templates) {
+	return (k) => templates[k] ?? k;
+}
+
+test("展开态：余额与花费是分开的两段，中间由 CSS 撑出空隙", async () => {
+	await withFixedNow(OFF_PEAK_ISO, async () => {
+		try {
+			const { mod, captured, t } = mount();
+			const Probe = captured["conversation.chat.turnTail:balance"].component;
+			const Button = captured["sidebar.footer.action:balance"].component;
+
+			// 先产生一笔花费，否则 costText 是「—」，测不到真实数字。
+			await mod.__render(() => Probe({
+				sessionId: "s1", seq: 1, turn: { start: { time: Date.now() + 10 } },
+				useSession: fakeUseSession([{ kind: "assistant", seq: 1, usage: { inputTokens: 1000, outputTokens: 500, cacheReadTokens: 0 } }]),
+				modelDirectories: fakeModelDirectories({ provider: "deepseek-official", model: "deepseek-v4-flash" })
+			}));
+
+			const tree = flatten(await mod.__render(() => Button({ wide: true, t, store: { toggle() {} } })));
+			const btn = tree.find((n) => n.type === "button");
+			assert.strictEqual(btn.props.className, "dsbSideBtn");
+
+			// **重点是「两个节点」而不是「一个拼起来的字符串」**：靠 `·` 分隔时，
+			// CSS 没法在中间撑开空隙，窄栏截断也只能整句一起切。
+			const bal = tree.find((n) => n.props && n.props.className === "dsbSideBal");
+			const costNode = tree.find((n) => n.props && n.props.className === "dsbSideCost");
+			assert.ok(bal, "余额应该是独立的一段");
+			assert.ok(costNode, "花费应该是独立的一段");
+			assert.match(String(bal.props.children), /balance\.label/, "第一段是余额");
+			assert.ok(String(bal.props.children).includes("12.34"), `第一段要带上余额数字，实际: ${bal.props.children}`);
+
+			// 花费的算法必须跟面板里那一行同源：同样是 0.0037，不是另算一份。
+			assert.ok(String(costNode.props.children).includes("CNY 0.0037"),
+				`侧边栏花费应与面板同源（CNY 0.0037），实际: ${costNode.props.children}`);
+
+			// 可视标签用短的（「花费」），紧挨着「余额」就能读懂；title/aria 用完整
+			// 那句（「本次打开花费（预估）」）——悬浮提示没有那个上下文，而折叠成图标
+			// 时它更是唯一能读到这两个数的地方。两者刻意不同，别顺手改成同一个 key。
+			assert.match(String(costNode.props.children), /^balance\.cost\.short /,
+				`可视标签应该是短的那个词条，实际: ${costNode.props.children}`);
+			assert.ok(btn.props.title.includes("balance.label") && btn.props.title.includes("balance.cost.title"),
+				`title 应换用完整那句词条，实际: ${btn.props.title}`);
+		} finally {
+			cleanup();
+		}
+	});
+});
+
+test("目前单价要带币种，数字不能把浮点误差原样摊出来", async () => {
+	await withFixedNow(PEAK_ISO, async () => {
+		try {
+			const { mod, captured } = mount();
+			// 0.7 * 1.3 在浮点里是 0.9099999999999999 —— 专门挑这组数，
+			// 「加了单位」和「数字本身能看」是同一处显示的两半，缺一半都不算修好。
+			const pricing = {
+				currency: "USD",
+				peakMultiplier: 1.3,
+				modelPricing: { "deepseek-official:deepseek-v4-flash": { cacheHitPerMillion: 0.7, cacheMissPerMillion: 1.5, outputPerMillion: 4.5 } }
+			};
+			globalThis.fetch = (url) => (String(url).endsWith("/balance/pricing")
+				? Promise.resolve({ ok: true, json: async () => ({ ok: true, pricing }) })
+				: Promise.resolve({ ok: true, json: async () => ({ ok: true, value: { balance_infos: [] }, pricing }) }));
+
+			const Probe = captured["conversation.chat.turnTail:balance"].component;
+			const Panel = captured["shell.overlay:balance-panel"].component;
+			await mod.__render(() => Probe({
+				sessionId: "s1", seq: 1, turn: { start: { time: Date.now() + 10 } },
+				useSession: fakeUseSession([{ kind: "assistant", seq: 1, usage: { inputTokens: 1000, outputTokens: 500, cacheReadTokens: 0 } }]),
+				modelDirectories: fakeModelDirectories({ provider: "deepseek-official", model: "deepseek-v4-flash" })
+			}));
+
+			const t = tWith({
+				"balance.price.title": "单价（{currency} / 每百万 token，{period}）",
+				"balance.price.row": "命中 {hit} · 未命中 {miss} · 输出 {output}"
+			});
+			const tree = flatten(await mod.__render(() => Panel({ t, store: { subscribe: () => () => {}, getSnapshot: () => true, close() {} } })));
+			const text = textOf(tree);
+
+			// 「命中 0.91 · 未命中 1.95」这几个裸数字单看是人民币还是美元全靠猜，
+			// 币种在小节标题里说一次就够，不用在每行三个数上各贴一遍。
+			assert.ok(text.includes("单价（USD / 每百万 token"), `单价标题应带上币种，实际:\n${text}`);
+			assert.ok(text.includes("命中 0.91"), `0.7 × 1.3 应显示成 0.91，实际:\n${text}`);
+			assert.ok(!text.includes("0.9099999999999999"), `浮点误差不该原样摊到界面上，实际:\n${text}`);
+			assert.ok(text.includes("未命中 1.95") && text.includes("输出 5.85"), `另外两个单价也要按同一套格式化，实际:\n${text}`);
+		} finally {
+			cleanup();
+		}
+	});
+});
+
+test("单价表没声明币种时，用不带币种的标题，而不是渲染出一个空槽", async () => {
+	await withFixedNow(OFF_PEAK_ISO, async () => {
+		try {
+			const { mod, captured } = mount();
+			// 老配置可能没有 currency 字段，而这时花费那边也还没记下任何币种。
+			const pricing = { peakMultiplier: 1, modelPricing: { "deepseek-official:deepseek-v4-flash": { cacheHitPerMillion: 0.5, cacheMissPerMillion: 2, outputPerMillion: 8 } } };
+			globalThis.fetch = (url) => (String(url).endsWith("/balance/pricing")
+				? Promise.resolve({ ok: true, json: async () => ({ ok: true, pricing }) })
+				: Promise.resolve({ ok: true, json: async () => ({ ok: true, value: { balance_infos: [] }, pricing }) }));
+
+			const Probe = captured["conversation.chat.turnTail:balance"].component;
+			const Panel = captured["shell.overlay:balance-panel"].component;
+			await mod.__render(() => Probe({
+				sessionId: "s1", seq: 1, turn: { start: { time: Date.now() + 10 } },
+				useSession: fakeUseSession([{ kind: "assistant", seq: 1, usage: { inputTokens: 1000, outputTokens: 500, cacheReadTokens: 0 } }]),
+				modelDirectories: fakeModelDirectories({ provider: "deepseek-official", model: "deepseek-v4-flash" })
+			}));
+
+			const t = tWith({
+				"balance.price.title": "单价（{currency} / 每百万 token，{period}）",
+				"balance.price.title_nocurrency": "单价（每百万 token，{period}）"
+			});
+			const text = textOf(flatten(await mod.__render(() => Panel({ t, store: { subscribe: () => () => {}, getSnapshot: () => true, close() {} } }))));
+			assert.ok(text.includes("单价（每百万 token"), `没有币种时应换用不带币种的标题，实际:\n${text}`);
+			assert.ok(!text.includes("（ / 每百万"), `不该留下一个空的币种槽，实际:\n${text}`);
+		} finally {
+			cleanup();
+		}
+	});
+});
+
+test("还没产生花费时显示 0 而不是「—」，且带上单价表的币种", async () => {
+	await withFixedNow(OFF_PEAK_ISO, async () => {
+		try {
+			const { mod, captured, t } = mount();
+			const Button = captured["sidebar.footer.action:balance"].component;
+			const Panel = captured["shell.overlay:balance-panel"].component;
+
+			// 刻意**不**跑探针：costStore 里一笔都没有，currency 还是 null。
+			// 「—」在这个面板里的含义是「读不出来」，而这里是个确定的事实——没花钱。
+			const btnTree = flatten(await mod.__render(() => Button({ wide: true, t, store: { toggle() {} } })));
+			const costNode = btnTree.find((n) => n.props && n.props.className === "dsbSideCost");
+			assert.ok(costNode, "花费那一段应该在");
+			assert.strictEqual(costNode.props.children, "balance.cost.short CNY 0.00",
+				`没花过钱时应显示 0（币种取自单价表），实际: ${costNode.props.children}`);
+
+			// 面板里那一行必须跟侧边栏同源，不能一个显示 0、另一个显示「—」。
+			const panelTree = flatten(await mod.__render(() => Panel({ t, store: { subscribe: () => () => {}, getSnapshot: () => true, close() {} } })));
+			const costTitleIdx = panelTree.findIndex((n) => n.props && n.props.children === "balance.cost.title");
+			const panelValue = panelTree.slice(costTitleIdx + 1).find((n) => n.props && n.props.className === "dsbRowValue");
+			assert.strictEqual(panelValue.props.children, "CNY 0.00",
+				`面板里那一行应与侧边栏同源，实际: ${panelValue.props.children}`);
+		} finally {
+			cleanup();
+		}
+	});
 });
