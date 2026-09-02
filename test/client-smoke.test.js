@@ -386,7 +386,7 @@ test("没配置单价的 model（或还没选过模型）只显示用量、不�
 			// 节点，看它自己的文本。
 			const costTitleIdx = panelTree.findIndex((n) => n.props && n.props.children === "balance.cost.title");
 			assert.ok(costTitleIdx >= 0, "应该能找到「花费」这个小节标题");
-			const costValueNode = panelTree.slice(costTitleIdx + 1).find((n) => n.props && n.props.className === "dsbRowValue");
+			const costValueNode = panelTree.slice(costTitleIdx + 1).find((n) => n.type === "td");
 			assert.ok(costValueNode, "花费小节下面应该有一个金额节点");
 			assert.strictEqual(costValueNode.props.children, "0.0037 元", `花费金额只该是 priced 那条算出来的数，不该把 unpriced 的用量也折算进来，实际: ${costValueNode.props.children}`);
 		} finally {
@@ -412,7 +412,7 @@ test("模型目录晚于探针首报加载完成时，同一条消息应从 unkn
 			}));
 			let panelTree = flatten(await mod.__render(() => Panel({ t, store: { subscribe: () => () => {}, getSnapshot: () => true, close() {} } })));
 			let costTitleIdx = panelTree.findIndex((n) => n.props && n.props.children === "balance.cost.title");
-			let costValueNode = panelTree.slice(costTitleIdx + 1).find((n) => n.props && n.props.className === "dsbRowValue");
+			let costValueNode = panelTree.slice(costTitleIdx + 1).find((n) => n.type === "td");
 			assert.strictEqual(costValueNode.props.children, "0.00 元", `模型目录未加载时不应计费，实际: ${costValueNode.props.children}`);
 
 			// 模型目录随后加载完成，同一条消息必须迁移到真实 model 并补记费用，不能因为
@@ -428,7 +428,7 @@ test("模型目录晚于探针首报加载完成时，同一条消息应从 unkn
 			assert.ok(text.includes("0.0037"), `目录加载后应补记费用，实际:\n${text}`);
 			costTitleIdx = panelTree.findIndex((n) => n.props && n.props.children === "balance.cost.title");
 
-			costValueNode = panelTree.slice(costTitleIdx + 1).find((n) => n.props && n.props.className === "dsbRowValue");
+			costValueNode = panelTree.slice(costTitleIdx + 1).find((n) => n.type === "td");
 			assert.strictEqual(costValueNode.props.children, "0.0037 元", `补记后花费金额应为 0.0037，实际: ${costValueNode.props.children}`);
 		} finally {
 			cleanup();
@@ -459,7 +459,7 @@ test("流式生成期间用 partial 估算花费并实时显示，消息完成�
 
 			let panelTree = flatten(await mod.__render(() => Panel({ t, store: { subscribe: () => () => {}, getSnapshot: () => true, close() {} } })));
 			let costTitleIdx = panelTree.findIndex((n) => n.props && n.props.children === "balance.cost.title");
-			let costValueNode = panelTree.slice(costTitleIdx + 1).find((n) => n.props && n.props.className === "dsbRowValue");
+			let costValueNode = panelTree.slice(costTitleIdx + 1).find((n) => n.type === "td");
 			assert.ok(costValueNode, "花费小节下面应该有一个金额节点");
 			assert.strictEqual(costValueNode.props.children, "0.0045 元", `流式期间应显示已完成精确值 + 进行中估算值，实际: ${costValueNode.props.children}`);
 			assert.ok(panelTree.some((n) => n.props && n.props.children === "balance.cost.live"), "流式期间应提示「含进行中消息的估算值」");
@@ -474,7 +474,7 @@ test("流式生成期间用 partial 估算花费并实时显示，消息完成�
 
 			panelTree = flatten(await mod.__render(() => Panel({ t, store: { subscribe: () => () => {}, getSnapshot: () => true, close() {} } })));
 			costTitleIdx = panelTree.findIndex((n) => n.props && n.props.children === "balance.cost.title");
-			costValueNode = panelTree.slice(costTitleIdx + 1).find((n) => n.props && n.props.className === "dsbRowValue");
+			costValueNode = panelTree.slice(costTitleIdx + 1).find((n) => n.type === "td");
 			assert.strictEqual(costValueNode.props.children, "0.0037 元", `完成后应回到精确值，实际: ${costValueNode.props.children}`);
 			assert.ok(!panelTree.some((n) => n.props && n.props.children === "balance.cost.live"), "完成后不应再显示「含进行中估算值」");
 		} finally {
@@ -508,7 +508,7 @@ test("对话报错时 partial 消失，流式估算会折进累计而不是清�
 
 			const panelTree = flatten(await mod.__render(() => Panel({ t, store: { subscribe: () => () => {}, getSnapshot: () => true, close() {} } })));
 			const costTitleIdx = panelTree.findIndex((n) => n.props && n.props.children === "balance.cost.title");
-			const costValueNode = panelTree.slice(costTitleIdx + 1).find((n) => n.props && n.props.className === "dsbRowValue");
+			const costValueNode = panelTree.slice(costTitleIdx + 1).find((n) => n.type === "td");
 			assert.ok(costValueNode, "花费小节下面应该有一个金额节点");
 			assert.strictEqual(costValueNode.props.children, "0.0045 元", `报错后应保留流式估算而不是清零，实际: ${costValueNode.props.children}`);
 		} finally {
@@ -548,7 +548,7 @@ test("流式估算折进累计后，精确 usage 到账会替换估算而不是�
 
 			const panelTree = flatten(await mod.__render(() => Panel({ t, store: { subscribe: () => () => {}, getSnapshot: () => true, close() {} } })));
 			const costTitleIdx = panelTree.findIndex((n) => n.props && n.props.children === "balance.cost.title");
-			const costValueNode = panelTree.slice(costTitleIdx + 1).find((n) => n.props && n.props.className === "dsbRowValue");
+			const costValueNode = panelTree.slice(costTitleIdx + 1).find((n) => n.type === "td");
 			assert.ok(costValueNode, "花费小节下面应该有一个金额节点");
 			assert.strictEqual(costValueNode.props.children, "0.0037 元", `精确 usage 应替换估算，实际: ${costValueNode.props.children}`);
 		} finally {
@@ -574,7 +574,7 @@ test("重载页面后花费从 sessionStorage 恢复，不会清零", async () =
 			const Panel = second.captured["shell.overlay:balance-panel"].component;
 			const panelTree = flatten(await second.mod.__render(() => Panel({ t: (k) => k, store: { subscribe: () => () => {}, getSnapshot: () => true, close() {} } })));
 			const costTitleIdx = panelTree.findIndex((n) => n.props && n.props.children === "balance.cost.title");
-			const costValueNode = panelTree.slice(costTitleIdx + 1).find((n) => n.props && n.props.className === "dsbRowValue");
+			const costValueNode = panelTree.slice(costTitleIdx + 1).find((n) => n.type === "td");
 			assert.ok(costValueNode, "花费小节下面应该有一个金额节点");
 			assert.strictEqual(costValueNode.props.children, "0.0037 元", `重载后应从 sessionStorage 恢复已累计花费，实际: ${costValueNode.props.children}`);
 		} finally {
@@ -755,7 +755,7 @@ test("还没产生花费时显示 0 而不是「—」，且带上单价表的�
 			// 面板里那一行必须跟侧边栏同源，不能一个显示 0、另一个显示「—」。
 			const panelTree = flatten(await mod.__render(() => Panel({ t, store: { subscribe: () => () => {}, getSnapshot: () => true, close() {} } })));
 			const costTitleIdx = panelTree.findIndex((n) => n.props && n.props.children === "balance.cost.title");
-			const panelValue = panelTree.slice(costTitleIdx + 1).find((n) => n.props && n.props.className === "dsbRowValue");
+			const panelValue = panelTree.slice(costTitleIdx + 1).find((n) => n.type === "td");
 			assert.strictEqual(panelValue.props.children, "0.00 元",
 				`面板里那一行应与侧边栏同源，实际: ${panelValue.props.children}`);
 		} finally {
