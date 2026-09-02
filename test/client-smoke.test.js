@@ -116,7 +116,17 @@ function fakeMutableModelDirectories(initialSelection) {
 	};
 }
 
-function loadModule() {
+function createStorage() {
+	let data = new Map();
+	return {
+		getItem: (key) => data.has(key) ? data.get(key) : null,
+		setItem: (key, value) => { data.set(key, String(value)); },
+		removeItem: (key) => { data.delete(key); },
+		clear: () => { data.clear(); }
+	};
+}
+
+function loadModule(sessionStorage = createStorage()) {
 	const src = fs.readFileSync(CLIENT, "utf8");
 	const registrations = [];
 	Object.assign(globalThis, {
@@ -128,7 +138,8 @@ function loadModule() {
 			addEventListener() {},
 			removeEventListener() {}
 		},
-		fetch: fakeFetch
+		fetch: fakeFetch,
+		sessionStorage
 	});
 
 	const reactJsx = {
@@ -217,7 +228,7 @@ function loadModule() {
 	return mod;
 }
 
-const cleanup = () => Object.assign(globalThis, { window: undefined, document: undefined, fetch: undefined });
+const cleanup = () => Object.assign(globalThis, { window: undefined, document: undefined, fetch: undefined, sessionStorage: undefined });
 
 function mount() {
 	const mod = loadModule();
@@ -226,6 +237,22 @@ function mount() {
 		effect: (fn) => { fn(); return () => {}; },
 		locale: { register() {} },
 		get: () => void 0, // 默认没有 modelDirectories；需要的测试自己在 apply 之外注入
+		slots: {
+			inject: (key, cb) => { cb(); return () => {}; },
+			register: (o, comp) => { captured[o.name + ":" + o.id] = { opts: o, component: comp }; return () => {}; }
+		}
+	};
+	mod.apply(ctx);
+	return { mod, captured, t: (k) => k };
+}
+
+function mountWithStorage(sessionStorage) {
+	const mod = loadModule(sessionStorage);
+	const captured = {};
+	const ctx = {
+		effect: (fn) => { fn(); return () => {}; },
+		locale: { register() {} },
+		get: () => void 0,
 		slots: {
 			inject: (key, cb) => { cb(); return () => {}; },
 			register: (o, comp) => { captured[o.name + ":" + o.id] = { opts: o, component: comp }; return () => {}; }
@@ -455,6 +482,107 @@ test("流式生成期间用 partial 估算花费并实时显示，消息完成�
 		}
 	});
 });
+
+test("对话报错时 partial 消失，流式估算会折进累计而不是清零", async () => {
+	await withFixedNow(OFF_PEAK_ISO, async () => {
+		try {
+			const { mod, captured, t } = mount();
+			const LiveProbe = captured["conversation.session.header.actions:balance-live"].component;
+			const Panel = captured["shell.overlay:balance-panel"].component;
+			const modelDirectories = fakeModelDirectories({ provider: "deepseek-official", model: "deepseek-v4-flash" });
+
+			// 流式生成中：1000 个 CJK 字符 ≈ 1000 输出 token，空闲时段 = 0.0045。
+			const partial = { turn: 7, step: 1, blocks: [{ kind: "text", text: "你".repeat(1000) }] };
+			await mod.__render(() => LiveProbe({
+				sessionId: "s1",
+				useSession: fakeUseSessionSnapshot({ nodes: [], partial, turnTimings: undefined }),
+				modelDirectories
+			}));
+
+			// 对话报错：partial 消失，且没有任何带 usage 的最终 assistant 节点。
+			await mod.__render(() => LiveProbe({
+				sessionId: "s1",
+				useSession: fakeUseSessionSnapshot({ nodes: [], partial: null, turnTimings: undefined }),
+				modelDirectories
+			}));
+
+			const panelTree = flatten(await mod.__render(() => Panel({ t, store: { subscribe: () => () => {}, getSnapshot: () => true, close() {} } })));
+			const costTitleIdx = panelTree.findIndex((n) => n.props && n.props.children === "balance.cost.title");
+			const costValueNode = panelTree.slice(costTitleIdx + 1).find((n) => n.props && n.props.className === "dsbRowValue");
+			assert.ok(costValueNode, "花费小节下面应该有一个金额节点");
+			assert.strictEqual(costValueNode.props.children, "CNY 0.0045", `报错后应保留流式估算而不是清零，实际: ${costValueNode.props.children}`);
+		} finally {
+			cleanup();
+		}
+	});
+});
+
+test("流式估算折进累计后，精确 usage 到账会替换估算而不是重复计费", async () => {
+	await withFixedNow(OFF_PEAK_ISO, async () => {
+		try {
+			const { mod, captured, t } = mount();
+			const LiveProbe = captured["conversation.session.header.actions:balance-live"].component;
+			const Probe = captured["conversation.chat.turnTail:balance"].component;
+			const Panel = captured["shell.overlay:balance-panel"].component;
+			const modelDirectories = fakeModelDirectories({ provider: "deepseek-official", model: "deepseek-v4-flash" });
+
+			const partial = { turn: 7, step: 1, blocks: [{ kind: "text", text: "你".repeat(1000) }] };
+			await mod.__render(() => LiveProbe({
+				sessionId: "s1",
+				useSession: fakeUseSessionSnapshot({ nodes: [], partial, turnTimings: undefined }),
+				modelDirectories
+			}));
+			// partial 消失 → 估算被折进累计（0.0045）。
+			await mod.__render(() => LiveProbe({
+				sessionId: "s1",
+				useSession: fakeUseSessionSnapshot({ nodes: [], partial: null, turnTimings: undefined }),
+				modelDirectories
+			}));
+
+			// 精确 usage 到账（同一 turn/step）：应撤掉 0.0045 的估算，只保留 0.0037。
+			const finalNode = { kind: "assistant", seq: 1, step: 1, usage: { inputTokens: 1000, outputTokens: 500, cacheReadTokens: 0 } };
+			await mod.__render(() => Probe({
+				sessionId: "s1", seq: 1, turn: { start: { time: Date.now() + 10 }, turn: 7 },
+				useSession: fakeUseSession([finalNode]), modelDirectories
+			}));
+
+			const panelTree = flatten(await mod.__render(() => Panel({ t, store: { subscribe: () => () => {}, getSnapshot: () => true, close() {} } })));
+			const costTitleIdx = panelTree.findIndex((n) => n.props && n.props.children === "balance.cost.title");
+			const costValueNode = panelTree.slice(costTitleIdx + 1).find((n) => n.props && n.props.className === "dsbRowValue");
+			assert.ok(costValueNode, "花费小节下面应该有一个金额节点");
+			assert.strictEqual(costValueNode.props.children, "CNY 0.0037", `精确 usage 应替换估算，实际: ${costValueNode.props.children}`);
+		} finally {
+			cleanup();
+		}
+	});
+});
+
+test("重载页面后花费从 sessionStorage 恢复，不会清零", async () => {
+	await withFixedNow(OFF_PEAK_ISO, async () => {
+		const storage = createStorage();
+		try {
+			const first = mountWithStorage(storage);
+			const Probe = first.captured["conversation.chat.turnTail:balance"].component;
+			await first.mod.__render(() => Probe({
+				sessionId: "s1", seq: 1, turn: { start: { time: Date.now() + 10 } },
+				useSession: fakeUseSession([{ kind: "assistant", seq: 1, usage: { inputTokens: 1000, outputTokens: 500, cacheReadTokens: 0 } }]),
+				modelDirectories: fakeModelDirectories({ provider: "deepseek-official", model: "deepseek-v4-flash" })
+			}));
+
+			// 第二个模块实例：模拟页面重载（factory 重跑），共享同一个 sessionStorage。
+			const second = mountWithStorage(storage);
+			const Panel = second.captured["shell.overlay:balance-panel"].component;
+			const panelTree = flatten(await second.mod.__render(() => Panel({ t: (k) => k, store: { subscribe: () => () => {}, getSnapshot: () => true, close() {} } })));
+			const costTitleIdx = panelTree.findIndex((n) => n.props && n.props.children === "balance.cost.title");
+			const costValueNode = panelTree.slice(costTitleIdx + 1).find((n) => n.props && n.props.className === "dsbRowValue");
+			assert.ok(costValueNode, "花费小节下面应该有一个金额节点");
+			assert.strictEqual(costValueNode.props.children, "CNY 0.0037", `重载后应从 sessionStorage 恢复已累计花费，实际: ${costValueNode.props.children}`);
+		} finally {
+			cleanup();
+		}
+	});
+});
+
 test("历史消息（turn.start.time 早于本次启动）不计入，同一条消息不会重复计费", async () => {
 	await withFixedNow(OFF_PEAK_ISO, async () => {
 		try {

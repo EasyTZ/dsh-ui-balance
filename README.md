@@ -15,7 +15,7 @@
 一条命令装完：
 
 ```sh
-dsh plugin --profile <name> add github:EasyTZ/dsh-ui-balance#v0.5.0
+dsh plugin --profile <name> add github:EasyTZ/dsh-ui-balance#v0.5.1
 ```
 
 `<name>` 换成你的 profile 名（桌面版通常为 `web`，TUI 为 `tui`）。插件自带 `dsh.bundle` 层（`cordis.patch.yml`），`dsh plugin add` 会同时完成「装进去」和「注册激活」，**不需要再手写 patch**。
