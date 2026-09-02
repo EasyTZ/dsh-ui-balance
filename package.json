@@ -1,7 +1,7 @@
 {
   "name": "@easytz/dsh-ui-balance",
-  "version": "0.5.6",
-  "description": "Display DeepSeek API account balance under each assistant turn",
+  "version": "0.5.7",
+  "description": "dsh plugin: DeepSeek balance, daily/monthly spend, usage & pricing tables, multi-provider cost tracking",
   "type": "module",
   "main": "lib/index.js",
   "exports": {
