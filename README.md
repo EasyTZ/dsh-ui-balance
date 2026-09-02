@@ -1,37 +1,46 @@
 # dsh-ui-balance
 
-[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（下称 dsh）的第三方插件：在**每条 AI 回复下方**显示 DeepSeek 账户余额。
+[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（下称 dsh）的第三方插件：在**每条 AI 回复下方**显示 DeepSeek 账户余额，并在侧边栏显示当前会话花费估算。
 
-不用切到网页查账户，聊天的过程中余额一目了然。
+不用切到网页查账户，聊天的过程中余额和花费一目了然。
 
 ## 前置要求
 
-- dsh `>= 0.1.0-rc.7`（peer 依赖：`@deepseek-ai/cordis ^4.0.1`、`@deepseek-ai/dsh-credentials ^0.1.0-rc.7`、`@deepseek-ai/dsh-typert-protocol ^0.1.0-rc.7`）
+- dsh `>= 0.1.1-rc.2`（peer 依赖：`@deepseek-ai/cordis ^4.0.1`、`@deepseek-ai/dsh-credentials ^0.1.0-rc.7`、`@deepseek-ai/dsh-host-webserver ^0.1.1-rc.2`、`@deepseek-ai/dsh-typert-protocol ^0.1.0-rc.7`、`@deepseek-ai/schemastery ^3.18.1`）
 - 已配置 `DEEPSEEK_API_KEY` 凭据（未配置时面板会显示「未配置 DEEPSEEK_API_KEY」而不是静默失败）
+- `pnpm` 可用（`dsh plugin` 底层转发给 pnpm）
 
 ## 安装
 
-「装进去」和「打开它」是两件事，缺一不可：
+一条命令装完：
 
 ```sh
-dsh plugin --profile <name> add github:EasyTZ/dsh-ui-balance#v0.1.1
+dsh plugin --profile <name> add github:EasyTZ/dsh-ui-balance#v0.5.0
 ```
 
-> **必须写 GitHub 地址，不能只写包名。** `dsh plugin add` 会把参数原样转给 pnpm，只写 `dsh-ui-balance` 会去 npm registry 找同名包 —— 那可能是别人的包（`dsh-git` 在 npm 上就已被他人占用）。换个 tag 就是换版本；想跟最新可以用 `#main`，但**不建议**：钉 tag 才能复现。
+`<name>` 换成你的 profile 名（桌面版通常为 `web`，TUI 为 `tui`）。插件自带 `dsh.bundle` 层（`cordis.patch.yml`），`dsh plugin add` 会同时完成「装进去」和「注册激活」，**不需要再手写 patch**。
 
-## 激活
+> 命令里的 `#v0.5.0` 是版本 tag，钉 tag 才能复现；想追最新可以改成 `#main`，但不建议。
 
-往 patch 层文件（`$DSH_HOME/profiles/<name>/cordis.patch.yml` 或机器级 `$DSH_HOME/cordis.patch.yml`）里加一条 `- insert:` 条目：
+重启 dsh 后，每条 AI 回复下方即出现余额行，侧边栏显示本次会话的花费估算。
 
-```yaml
-- insert:
-    - id: dsh-ui-balance
-      name: 'dsh-ui-balance'
+## 使用
+
+插件随会话自动展示，不需要手动操作：每条 AI 回复下方显示 DeepSeek 账户余额；侧边栏显示当前会话花费（流式估算、按所选模型计价、单价带币种）。未配置 `DEEPSEEK_API_KEY` 时会显示「未配置 DEEPSEEK_API_KEY」而不是静默失败。
+
+## 卸载
+
+一条命令卸载：
+
+```sh
+dsh plugin --profile <name> remove @easytz/dsh-ui-balance
 ```
 
-> **`id` 别用通用词**（比如 `balance`）。`- insert:` 不去重：一旦与 dsh 自带 bundle 里某条条目同名，cordis loader 会抛 `duplicate loader entry id`，**内核直接退出**。dsh 自带的 id 里有大量 `git` / `session` / `settings` / `storage` 这类通用词，而且内核会自行更新到新版本 —— 撞车只是时间问题。直接拿包名当 id 最省事。
+`<name>` 与安装时一致。`remove` 会把包从 profile 依赖里移除，`dsh` 随后会把它从激活清单（`dsh.profile.bundles`）里撤掉。
 
-重启 dsh 后，每条 AI 回复下方即出现余额行。
+> 如果你按旧版 README 手动往 `$DSH_HOME/profiles/<name>/cordis.patch.yml` 或 `$DSH_HOME/cordis.patch.yml` 里加过 `- insert:` 条目，卸载时把那段 YAML 一起删掉。
+
+重启 dsh 后，余额行与侧边栏花费消失。
 
 ## 已知限制
 
