@@ -320,9 +320,9 @@ test("探针不渲染任何东西，按当前选中模型算出花费", async ()
 			// ModelUsageRow，抓不出 ModelUsageRow 自己渲染错的 bug。
 			const usageTitleIdx = panelTree.findIndex((n) => n.props && n.props.children === "balance.usage.title");
 			assert.ok(usageTitleIdx >= 0, "应该能找到「用量」这个小节标题");
-			const usageLabelNode = panelTree.slice(usageTitleIdx + 1).find((n) => n.props && n.props.className === "dsbRowLabel");
+			const usageLabelNode = panelTree.slice(usageTitleIdx + 1).find((n) => n.props && n.props.className === "dsbPriceModel");
 			assert.ok(usageLabelNode, "用量小节下面应该有一个 model 标签节点");
-			assert.strictEqual(usageLabelNode.props.children, "deepseek-official:deepseek-v4-flash", `用量小节应该显示完整的 provider:model，实际: ${usageLabelNode.props.children}`);
+			assert.strictEqual(usageLabelNode.props.children, "deepseek-v4-flash", `用量小节应该只显示模型名，实际: ${usageLabelNode.props.children}`);
 		} finally {
 			cleanup();
 		}
@@ -714,7 +714,7 @@ test("目前单价每行带单位，数字不能把浮点误差原样摊出来",
 			const tree = flatten(await mod.__render(() => Panel({ t, store: { subscribe: () => () => {}, getSnapshot: () => true, close() {} } })));
 			const text = textOf(tree);
 			assert.ok(text.includes("单价（高峰时段"));
-			assert.ok(text.includes("deepseek-official:deepseek-v4-flash"));
+			assert.ok(text.includes("deepseek-v4-flash"));
 			assert.ok(text.includes("0.91 美元"));
 			assert.ok(!text.includes("0.9099999999999999"));
 			assert.ok(text.includes("1.95 美元") && text.includes("5.85 美元"));
