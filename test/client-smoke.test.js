@@ -353,6 +353,32 @@ test("高峰时段按 2 倍单价折算", async () => {
 	});
 });
 
+test("跨峰谷边界的消息按 turn 开始时刻计价，不按完成时刻", async () => {
+	await withFixedNow(PEAK_ISO, async () => {
+		try {
+			const { mod, captured, t } = mount();
+			const Probe = captured["conversation.chat.turnTail:balance"].component;
+			const Panel = captured["shell.overlay:balance-panel"].component;
+
+			const node = { kind: "assistant", seq: 1, usage: { inputTokens: 1000, outputTokens: 500, cacheReadTokens: 0 } };
+			const modelDirectories = fakeModelDirectories({ provider: "deepseek-official", model: "deepseek-v4-flash" });
+			// 当前是高峰（周二 10:00），但消息开始于空闲时段（周六 10:00）。
+			const offPeakStart = new Date(OFF_PEAK_ISO).getTime();
+			await mod.__render(() => Probe({
+				sessionId: "s1", seq: 1, turn: { start: { time: offPeakStart } },
+				useSession: fakeUseSession([node]), modelDirectories
+			}));
+
+			const panelTree = flatten(await mod.__render(() => Panel({ t, store: { subscribe: () => () => {}, getSnapshot: () => true, close() {} } })));
+			const costTitleIdx = panelTree.findIndex((n) => n.props && n.props.children === "balance.cost.title");
+			const costValueNode = panelTree.slice(costTitleIdx + 1).find((n) => n.type === "td");
+			assert.strictEqual(costValueNode.props.children, "0.0037 元", `应按 turn 开始时刻的空闲价计费，实际: ${costValueNode.props.children}`);
+		} finally {
+			cleanup();
+		}
+	});
+});
+
 test("没配置单价的 model（或还没选过模型）只显示用量、不计费，且不会跟别的 model 混在一起", async () => {
 	await withFixedNow(OFF_PEAK_ISO, async () => {
 		try {
@@ -462,7 +488,7 @@ test("流式生成期间用 partial 估算花费并实时显示，消息完成�
 			let costValueNode = panelTree.slice(costTitleIdx + 1).find((n) => n.type === "td");
 			assert.ok(costValueNode, "花费小节下面应该有一个金额节点");
 			assert.strictEqual(costValueNode.props.children, "0.0045 元", `流式期间应显示已完成精确值 + 进行中估算值，实际: ${costValueNode.props.children}`);
-			assert.ok(panelTree.some((n) => n.props && n.props.children === "balance.cost.live"), "流式期间应提示「含进行中消息的估算值」");
+			assert.ok(!panelTree.some((n) => n.props && n.props.children === "balance.cost.live"), "流式期间不应再渲染「含进行中估算值」提示行");
 
 			// 消息结束，turnTail 探针用精确 usage 结算：应清掉 live 估算，只剩精确值。
 			// 精确用量：(1000*1.5 + 500*4.5) / 1e6 = 0.00375 -> 显示 0.0037。
