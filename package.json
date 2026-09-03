@@ -1,7 +1,7 @@
 {
   "name": "@easytz/dsh-ui-balance",
   "version": "0.5.8",
-  "description": "dsh plugin: DeepSeek balance, daily/monthly spend, usage & pricing tables, multi-provider cost tracking",
+  "description": "余额面板：显示 DeepSeek 余额、每日/每月花费、用量与价格表，并追踪多提供商成本（Balance panel: DeepSeek balance, daily/monthly spend, usage & pricing tables, and multi-provider cost tracking）",
   "type": "module",
   "main": "lib/index.js",
   "exports": {
