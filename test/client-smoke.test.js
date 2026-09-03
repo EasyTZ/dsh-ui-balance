@@ -34,6 +34,21 @@ function flatten(node, out = []) {
 	return out;
 }
 
+/**
+ * 把树里的函数组件真的调起来展开（loadModule 内部的 deepRender 在测试外部用不到，
+ * 这里是同一套逻辑的对外版）。渲染循环里要在「点击的那一轮」当场检查表格内容，
+ * 而 jsx() 只造描述对象——不展开的话，UsageTable 这类子组件的表格根本还没生成，
+ * 断言会对着一棵空壳树做判断，看起来「数字不见了」，其实只是没渲染到。
+ */
+function expandComponents(node, depth = 0) {
+	if (node === null || node === undefined || typeof node !== "object" || depth > 60) return node;
+	if (Array.isArray(node)) return node.map((child) => expandComponents(child, depth + 1));
+	if (typeof node.type === "function") return expandComponents(node.type(node.props), depth + 1);
+	const children = node.props && node.props.children;
+	if (children === undefined) return node;
+	return { ...node, props: { ...node.props, children: expandComponents(children, depth + 1) } };
+}
+
 function textOf(nodes) {
 	return nodes.map((n) => JSON.stringify((n.props && n.props.children) ?? null) ?? "").join("\n");
 }
@@ -70,8 +85,15 @@ const PRICING = {
 	}
 };
 
+// /balance/cost-store 那次回填默认走兜底分支（ok:false，不回填）；
+// 需要模拟「回填晚到」的测试用 deferCostStore() 把它挂起，自己决定何时放行。
+let costStorePending = null;
+
 function fakeFetch(url) {
 	const u = String(url);
+	if (u.endsWith("/balance/cost-store") && costStorePending !== null) {
+		return costStorePending.then((payload) => ({ ok: true, json: async () => payload }));
+	}
 	if (u.endsWith("/balance/pricing")) {
 		return Promise.resolve({ ok: true, json: async () => ({ ok: true, pricing: PRICING }) });
 	}
@@ -785,6 +807,225 @@ test("还没产生花费时显示 0 而不是「—」，且带上单价表的�
 			assert.strictEqual(panelValue.props.children, "0.00 元",
 				`面板里那一行应与侧边栏同源，实际: ${panelValue.props.children}`);
 		} finally {
+			cleanup();
+		}
+	});
+});
+
+
+/**
+ * 让 /balance/cost-store 那次跨 origin 回填「挂起」，由测试决定什么时候放行。
+ * 默认（不调这个函数时）该路由走 fakeFetch 的兜底分支，返回 ok:false，不回填。
+ */
+function deferCostStore() {
+	let resolve;
+	costStorePending = new Promise((r) => { resolve = r; });
+	return {
+		resolve: (payload) => resolve(payload),
+		release: () => { costStorePending = null; }
+	};
+}
+
+/**
+ * 给日/周/月三个周期各喂一份**不同**的存量数字。三份不一样是有意的：真出现串味
+ * （比如三张表读了同一份数据、或者清零清错了周期），数字对不上就会当场露馅。
+ */
+function seedPeriodStorage() {
+	const now = new Date();
+	const pad = (n) => String(n).padStart(2, "0");
+	const dayKey = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+	const monday = new Date(now.getFullYear(), now.getMonth(), now.getDate() - ((now.getDay() + 6) % 7));
+	const weekKey = `${monday.getFullYear()}-${pad(monday.getMonth() + 1)}-${pad(monday.getDate())}`;
+	const monthKey = `${now.getFullYear()}-${pad(now.getMonth() + 1)}`;
+	const entry = (input) => [["deepseek-official:deepseek-v4-flash", {
+		provider: "deepseek-official",
+		model: "deepseek-official:deepseek-v4-flash",
+		priced: true,
+		tokens: { input, cacheRead: 10, output: 20 },
+		cost: 1
+	}]];
+	const storage = createStorage();
+	storage.setItem("dsh-ui-balance/dailyCostStore/v1", JSON.stringify({ day: dayKey, currency: "CNY", totalCost: 1, perModel: entry(1111), accounted: [] }));
+	storage.setItem("dsh-ui-balance/weeklyCostStore/v1", JSON.stringify({ week: weekKey, currency: "CNY", totalCost: 2, perModel: entry(2222), accounted: [] }));
+	storage.setItem("dsh-ui-balance/monthlyCostStore/v1", JSON.stringify({ month: monthKey, currency: "CNY", totalCost: 3, perModel: entry(3333), accounted: [] }));
+	return { storage, dayKey, weekKey, monthKey, entry };
+}
+
+test("用量汇总按日/周/月三个周期各出一张表，默认看「日」，数字取自对应周期的累计器", async () => {
+	await withFixedNow(OFF_PEAK_ISO, async () => {
+		// 日/周/月用量跟费用一样落在 localStorage 里跨启动累计，直接喂三份存量进去。
+		globalThis.localStorage = seedPeriodStorage().storage;
+
+		try {
+			const { mod, captured, t } = mount();
+			const Panel = captured["shell.overlay:balance-panel"].component;
+			const tree = flatten(await mod.__render(() => Panel({ t, store: { subscribe: () => () => {}, getSnapshot: () => true, close() {} } })));
+
+			const titleIdx = tree.findIndex((n) => n.props && n.props.children === "balance.usage.summary.title");
+			assert.ok(titleIdx >= 0, "用量汇总这一节应该在");
+
+			// 三个周期是一组互斥的单选，默认停在「日」。
+			const tabs = tree.filter((n) => n.type === "button" && typeof n.props?.className === "string" && n.props.className.includes("dsbPeriodTab"));
+			assert.deepStrictEqual(
+				tabs.map((n) => n.props.children),
+				["balance.usage.period.day", "balance.usage.period.week", "balance.usage.period.month"]
+			);
+			assert.deepStrictEqual(
+				tabs.map((n) => n.props.className.includes("dsbActive")),
+				[true, false, false],
+				"默认应该停在「日」"
+			);
+
+			// 表格结构跟「本次打开用量」完全一致：模型 + 四列数字，表头一次展示。
+			const headers = tree.slice(titleIdx).filter((n) => n.type === "th").map((n) => n.props.children);
+			assert.deepStrictEqual(headers.slice(0, 5), [
+				"balance.price.table.model",
+				"balance.usage.table.input",
+				"balance.usage.table.hit",
+				"balance.usage.table.output",
+				"balance.usage.table.hit_rate"
+			]);
+
+			// 默认周期是「日」，摊出来的就该是日累计器里那 1111，不是周/月那两份。
+			const cells = tree.slice(titleIdx).filter((n) => n.type === "td").map((n) => n.props.children);
+			assert.ok(cells.includes((1111).toLocaleString()), `「日」这一档应显示日累计的 1111，实际: ${cells.slice(0, 5).join(" | ")}`);
+			assert.ok(!cells.includes((2222).toLocaleString()) && !cells.includes((3333).toLocaleString()),
+				"同一时刻只该摊一个周期的数字，不能把周/月的也一起列出来");
+		} finally {
+			delete globalThis.localStorage;
+			cleanup();
+		}
+	});
+});
+
+
+test("标题栏的重置要二次确认：先点不清零，取消可反悔，确认后清掉「本次打开」+ 当前周期", async () => {
+	await withFixedNow(OFF_PEAK_ISO, async () => {
+		globalThis.localStorage = createStorage();
+		try {
+			const { mod, captured, t: rawT } = mount();
+			// 别的 key 照旧回显 key 本身，只有确认文案换成带 {period} 占位符的真模板：
+			// 「确认条问的是哪个周期」是这个功能的关键（问日、清成周就是事故），而 key
+			// 回显把占位符也吃掉了，看不出插值到底有没有发生。
+			const t = (k) => k === "balance.reset.confirm" ? "清零「本次打开」和「{period}」？" : rawT(k);
+
+			// 先真跑一条消息，让「本次打开」和日/周/月四份累计器同时有数。
+			const Probe = captured["conversation.chat.turnTail:balance"].component;
+			await mod.__render(() => Probe({
+				sessionId: "s1", seq: 1, turn: { start: { time: Date.now() + 10 } },
+				useSession: fakeUseSession([{ kind: "assistant", seq: 1, usage: { inputTokens: 1000, outputTokens: 500, cacheReadTokens: 0 } }]),
+				modelDirectories: fakeModelDirectories({ provider: "deepseek-official", model: "deepseek-v4-flash" })
+			}));
+
+			const Panel = captured["shell.overlay:balance-panel"].component;
+			const store = { subscribe: () => () => {}, getSnapshot: () => true, close() {} };
+
+			// 这个迷你 React 的 hook 状态只在一次 __render 内部跨轮存活，所以点击必须
+			// 发生在渲染循环里面：把 Panel 直接调起来拿到当轮的树，点一下，setState 把
+			// dirty 立起来，循环自然会再渲染一轮——这才是真实的「点了按钮再重画」。
+			const seen = [];
+			let step = 0;
+			const click = (nodes, className) => {
+				const btn = nodes.find((n) => n.type === "button" && n.props?.className === className);
+				assert.ok(btn, `应该能找到按钮 .${className}`);
+				btn.props.onClick();
+			};
+			const finalTree = await mod.__render(() => {
+				const tree = Panel({ t, store });
+				const nodes = flatten(expandComponents(tree));
+				seen[step] = nodes;
+				if (step === 0) { click(nodes, "dsbResetBtn"); step = 1; }
+				else if (step === 1) { click(nodes, "dsbConfirmNo"); step = 2; }
+				else if (step === 2) { click(nodes, "dsbResetBtn"); step = 3; }
+				else if (step === 3) { click(nodes, "dsbConfirmYes"); step = 4; }
+				return tree;
+			});
+
+			// 四格费用的读法：费用汇总表表头之后的头四个单元格，依次是本次打开/日/周/月。
+			const costCells = (nodes) => {
+				const idx = nodes.findIndex((n) => n.type === "th" && n.props?.children === "balance.cost.title");
+				return nodes.slice(idx).filter((n) => n.type === "td").slice(0, 4).map((n) => n.props.children);
+			};
+
+			// 第一轮：重置按钮在标题栏上（跟关闭按钮同一行），按钮上写着当前周期。
+			const headerIdx = seen[0].findIndex((n) => n.props?.className === "dsbPanelHeader");
+			const resetBtn = seen[0].slice(headerIdx).find((n) => n.props?.className === "dsbResetBtn");
+			assert.ok(resetBtn, "重置按钮应该在面板标题栏里");
+			// 按钮上只写「重置」，周期留给二次确认那句话去说清楚。
+			assert.strictEqual(resetBtn.props.children, "balance.reset.button");
+			assert.ok(!seen[0].some((n) => n.props?.className === "dsbConfirmBar"), "还没点之前不该有确认条");
+			const before = costCells(seen[0]);
+			assert.ok(before.every((cell) => cell !== "0.00 元"), `四格费用一开始都该有数，实际: ${before.join(" | ")}`);
+
+			// 第二轮：确认条出现，写明清的是「本次打开 + 日」，且**数字一个没动**。
+			const confirmText = seen[1].find((n) => n.props?.className === "dsbConfirmText");
+			assert.ok(confirmText, "点重置后应该弹出就地确认条");
+			assert.strictEqual(confirmText.props.children, "清零「本次打开」和「balance.usage.period.day」？");
+			assert.deepStrictEqual(costCells(seen[1]), before, "只点一下重置不能清零");
+
+			// 第三轮：点了取消，确认条收掉，数字还在。
+			assert.ok(!seen[2].some((n) => n.props?.className === "dsbConfirmBar"), "取消后确认条应该收掉");
+			assert.deepStrictEqual(costCells(seen[2]), before, "取消不能把数字带走");
+
+			// 确认之后：本次打开 + 本日归零，本周/本月原样不动（选的是「日」）。
+			const finalNodes = flatten(expandComponents(finalTree));
+			const after = costCells(finalNodes);
+			assert.deepStrictEqual(after.slice(0, 2), ["0.00 元", "0.00 元"], `本次打开和本日费用都该清零，实际: ${after.join(" | ")}`);
+			assert.deepStrictEqual(after.slice(2), before.slice(2), "选的是「日」，本周/本月不该跟着被清");
+
+			// 两张用量表（本次打开 / 当前周期）也要跟着空掉——费用清了、用量还挂着旧
+			// 数字的话，两处对不上，用户会以为重置只清了一半。
+			const usageIdx = finalNodes.findIndex((n) => n.props?.children === "balance.usage.title");
+			const summaryIdx = finalNodes.findIndex((n) => n.props?.children === "balance.usage.summary.title");
+			assert.ok(textOf(finalNodes.slice(usageIdx, summaryIdx)).includes("balance.usage.empty"), "本次打开用量表应该空了");
+			assert.ok(textOf(finalNodes.slice(summaryIdx)).includes("balance.usage.summary.empty"), "当前周期的用量表应该空了");
+
+			// 清零要落盘：日那份被清空，周/月两份原样留着。
+			const daily = JSON.parse(globalThis.localStorage.getItem("dsh-ui-balance/dailyCostStore/v1"));
+			assert.strictEqual(daily.totalCost, 0);
+			assert.deepStrictEqual(daily.perModel, [], "日用量应该从 localStorage 里也清掉");
+			const weekly = JSON.parse(globalThis.localStorage.getItem("dsh-ui-balance/weeklyCostStore/v1"));
+			assert.ok(weekly.totalCost > 0 && weekly.perModel.length === 1, "清「日」不该动到「周」");
+			const monthly = JSON.parse(globalThis.localStorage.getItem("dsh-ui-balance/monthlyCostStore/v1"));
+			assert.ok(monthly.totalCost > 0 && monthly.perModel.length === 1, "清「日」不该动到「月」");
+		} finally {
+			delete globalThis.localStorage;
+			cleanup();
+		}
+	});
+});
+
+test("清零后，启动时那次跨 origin 回填不能把旧数字灌回来", async () => {
+	await withFixedNow(OFF_PEAK_ISO, async () => {
+		const seeded = seedPeriodStorage();
+		globalThis.localStorage = seeded.storage;
+		const gate = deferCostStore();
+		try {
+			const { mod, captured, t } = mount();
+			const Panel = captured["shell.overlay:balance-panel"].component;
+			const store = { subscribe: () => () => {}, getSnapshot: () => true, close() {} };
+			let step = 0;
+			await mod.__render(() => {
+				const tree = Panel({ t, store });
+				const nodes = flatten(expandComponents(tree));
+				const click = (className) => nodes.find((n) => n.type === "button" && n.props?.className === className).props.onClick();
+				if (step === 0) { click("dsbResetBtn"); step = 1; }
+				else if (step === 1) { click("dsbConfirmYes"); step = 2; }
+				return tree;
+			});
+
+			// host 侧那份文件是异步读回来的，可能晚于用户点确认才到——它看到本地是 0，
+			// 「本地还没数据、拿文件补上」这条回填规则就会把刚清掉的数字原样灌回来。
+			// 这里让那次回填**真的**晚到：清零点完之后才放行 /balance/cost-store 的响应。
+			gate.resolve({ ok: true, daily: { day: seeded.dayKey, currency: "CNY", totalCost: 9, perModel: seeded.entry(9999), accounted: [] } });
+			await new Promise((r) => setTimeout(r, 0));
+			const tree = flatten(await mod.__render(() => Panel({ t, store })));
+			const summaryIdx = tree.findIndex((n) => n.props?.children === "balance.usage.summary.title");
+			assert.ok(!textOf(tree.slice(summaryIdx)).includes((9999).toLocaleString()),
+				"手动清过的周期不该被启动回填灌回旧数字");
+		} finally {
+			gate.release();
+			delete globalThis.localStorage;
 			cleanup();
 		}
 	});
