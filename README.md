@@ -7,6 +7,9 @@
 
 ![费用详情：余额、用量、费用汇总与实时单价](docs/panel.png)
 
+<details open>
+<summary><b>中文</b></summary>
+
 ## 前置要求
 
 - dsh `>= 0.1.1-rc.2`
@@ -23,7 +26,7 @@
 dsh plugin --profile <name> add @easytz/dsh-ui-balance
 ```
 
-`<name>` 是**必填**的 profile 名，不能省略——桌面版通常是 `web`，TUI 是 `tui`；不确定就看 `$DSH_HOME/profiles/` 下的目录名。想钉死版本就写 `@easytz/dsh-ui-balance@0.6.4`。
+`<name>` 是**必填**的 profile 名，不能省略——桌面版通常是 `web`，TUI 是 `tui`；不确定就看 `$DSH_HOME/profiles/` 下的目录名。想钉死版本就写 `@easytz/dsh-ui-balance@0.6.5`。
 
 装完重启 dsh 即可使用。
 
@@ -71,9 +74,10 @@ dsh plugin --profile <name> remove @easytz/dsh-ui-balance
 
 纯 web UI + HTTP 路由，理论上全平台可用；目前主要在 Windows 桌面发行版上验证。
 
----
+</details>
 
-## English
+<details>
+<summary><b>English</b></summary>
 
 A third-party plugin for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (dsh) that puts your **API balance and spending** in the sidebar, so you never have to open a billing page mid-conversation.
 
@@ -121,6 +125,8 @@ dsh plugin --profile <name> remove @easytz/dsh-ui-balance
 - Only DeepSeek and Moonshot/Kimi expose a public balance endpoint; other vendors need one before support can be added.
 - Prices come from local configuration — worth checking against the vendor's pricing page now and then.
 - Pure web UI plus HTTP routes, so it should work everywhere; mainly verified on the Windows desktop build.
+
+</details>
 
 ## 许可证 / License
 
