@@ -1,70 +1,66 @@
 # dsh-ui-balance
 
-给 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（下称 dsh）用的余额与费用详情插件。
+**余额与费用：DeepSeek 余额、本次/日/周/月花费、各模型用量与实时单价。**
+**Balance and cost panel for DeepSeek Harness: balance, spend, per-model usage, live pricing.**
 
-在聊天过程中，不用切到网页查账单，侧边栏和弹窗里就能看到：
+[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（下称 dsh）的第三方插件。聊天过程中不用切到网页查账单，侧边栏和弹窗里就能看到。
 
-- DeepSeek 账户余额
-- 本次打开 / 本日 / 本周 / 本月费用
-- 每个模型的用量和缓存命中率，可按日 / 周 / 月查看
-- 所有已配置模型的实时单价
-- 当前是「峰价」还是「谷价」
+![费用详情：余额、用量、费用汇总与实时单价](docs/panel.png)
 
-## 功能一览
+## 前置要求
 
-### 侧边栏
-- 显示余额和本次打开花费
-- 最右侧显示绿色「谷」或蓝色「峰」，一眼看清当前计费时段
+- dsh `>= 0.1.1-rc.2`
+- 已配置 `DEEPSEEK_API_KEY` 凭据
+- `pnpm` 可用（`dsh plugin` 底层转发给 pnpm）
 
-### 费用详情弹窗
-点开侧边栏余额行，弹出完整面板：
+## 安装
 
-- **API 供应商**：显示当前接入的供应商（DeepSeek / 智谱 GLM / Kimi 等）
-- **余额**：DeepSeek / Moonshot(Kimi) 可直接查询；其他厂商显示「无法查询余额」
-- **费用汇总表**：本次打开费用、本日费用、本周费用、本月费用
-- **本次打开用量表**：模型、输入未命中、缓存命中、输出、缓存命中率
-- **用量汇总表**：同样的列，按「日 / 周 / 月」切换统计周期
-- **重置按钮**：标题栏右上角，清零「本次打开」+ 当前选中周期的费用与用量（清哪个周期在二次确认里写明）
-- **目前单价表**：所有已配置模型的价格，单位统一为每百万 token
+最省事的办法是用[插件市场](https://github.com/EasyTZ/dsh-market)：打开「发现」，搜 `balance`，点「安装」。
 
-### 费用统计
-- 本次打开费用：从本次启动开始累计，含进行中消息的实时估算
-- 本日费用：当天 00:00 - 23:59:59 累计，自动跨天清零
-- 本周费用：周一 00:00 - 周日 23:59:59 累计，自动跨周清零
-- 本月费用：当月 1 日 00:00 到最后一天 23:59:59 累计，自动跨月清零
-- 用量汇总与费用汇总同源：同一个周期、同一批消息，两张表对得上
-- 重置：一次清掉「本次打开」和**当前选中周期**的费用与用量（费用、用量一起清；日/周/月互不影响），
-  需二次确认，清零后同步落盘，重开应用也不会长回来
-- 多会话并行时，所有正在进行的会话都会计入费用
+命令行：
 
-### 供应商兼容性
+```sh
+dsh plugin --profile <name> add @easytz/dsh-ui-balance
+```
+
+`<name>` 是**必填**的 profile 名，不能省略——桌面版通常是 `web`，TUI 是 `tui`；不确定就看 `$DSH_HOME/profiles/` 下的目录名。想钉死版本就写 `@easytz/dsh-ui-balance@0.6.4`。
+
+装完重启 dsh 即可使用。
+
+## 用法
+
+**侧边栏那一行.** 装完就在侧边栏里，显示账户余额和「本次打开」的花费；最右侧一个绿色「谷」或蓝色「峰」，一眼看清当前是哪个计费时段。
+
+**点开它.** 点侧边栏那一行，弹出费用详情面板，从上到下是：
+
+| 区块 | 看什么 |
+|---|---|
+| API 供应商 | 当前接入的是谁（DeepSeek / 智谱 GLM / Kimi …） |
+| 余额 | DeepSeek、Moonshot(Kimi) 直接查；其他厂商显示「无法查询余额」 |
+| 本次打开用量 | 按模型列出输入未命中 / 缓存命中 / 输出 token 与缓存命中率 |
+| 用量汇总 | 同样的列，右上角切「日 / 周 / 月」 |
+| 费用汇总 | 本次打开（含进行中消息的实时估算）、本日、本周、本月 |
+| 目前单价 | 所有已配置模型的价格，统一按每百万 token；峰谷折算后的实际单价 |
+
+**周期怎么算.** 本日 = 当天 00:00–23:59:59，本周 = 周一到周日，本月 = 1 日到月末，都自动跨期清零。多个会话并行时，所有进行中的会话都计入。用量汇总和费用汇总同源——同一个周期、同一批消息，两张表对得上。
+
+**重置.** 标题栏右上角的「重置」清零「本次打开」**加上当前选中的那个周期**（清哪个周期会写在二次确认里）。费用和用量一起清，日 / 周 / 月互不影响。清完立刻落盘，重开应用不会长回来。
+
+## 供应商兼容性
+
 | 供应商 | 余额查询 | 费用统计 | 价格表 |
 |---|---|---|---|
 | DeepSeek | 支持 | 支持 | 支持 |
 | Moonshot / Kimi | 支持 | 支持 | 支持 |
 | OpenAI / Claude / Grok / Gemini | 显示「无法查询余额」 | 支持 | 支持（需配置模型单价） |
 
-## 前置要求
-
-- dsh `>= 0.1.1-rc.2`
-- 已配置 `DEEPSEEK_API_KEY` 凭据
-- `pnpm` 可用
-
-## 安装
-
-```sh
-dsh plugin --profile <name> add github:EasyTZ/dsh-ui-balance#v0.6.3
-```
-
-`<name>` 换成你的 profile 名（桌面版通常为 `web`）。
-
-重启 dsh 后即可使用。
-
 ## 卸载
 
 ```sh
 dsh plugin --profile <name> remove @easytz/dsh-ui-balance
 ```
+
+`<name>` 与安装时一致。重启 dsh 后侧边栏那一行消失。
 
 ## 已知限制
 
@@ -74,3 +70,58 @@ dsh plugin --profile <name> remove @easytz/dsh-ui-balance
 ## 平台支持
 
 纯 web UI + HTTP 路由，理论上全平台可用；目前主要在 Windows 桌面发行版上验证。
+
+---
+
+## English
+
+A third-party plugin for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (dsh) that puts your **API balance and spending** in the sidebar, so you never have to open a billing page mid-conversation.
+
+### Requirements
+
+- dsh `>= 0.1.1-rc.2`
+- A configured `DEEPSEEK_API_KEY` credential
+- `pnpm` available (`dsh plugin` shells out to pnpm)
+
+### Install
+
+Easiest path is the [plugin market](https://github.com/EasyTZ/dsh-market): open **Discover**, search `balance`, hit **Install**.
+
+From the command line:
+
+```sh
+dsh plugin --profile <name> add @easytz/dsh-ui-balance
+```
+
+`<name>` is **required** — your dsh profile (usually `web` for the desktop/web UI, `tui` for the TUI). Restart dsh afterwards.
+
+### Usage
+
+- **Sidebar row.** Shows your account balance and what this session has cost so far, plus a green "off-peak" / blue "peak" marker for the current pricing window.
+- **Click the row** to open the detail panel: provider, balance, per-model token usage for this session, a usage summary you can switch between day / week / month, a cost summary (this session — including a live estimate for in-flight messages — plus today, this week, this month), and the current price table for every configured model, normalised to per-million tokens.
+- **Periods** roll over automatically (day at midnight, week on Monday, month on the 1st). Parallel sessions all count toward the same totals, and the usage and cost tables are computed from the same data, so they always agree.
+- **Reset** (top right) clears "this session" *plus the currently selected period* — costs and usage together, with a confirmation step naming the period. Day/week/month are independent, and the reset is persisted immediately.
+
+### Provider support
+
+| Provider | Balance lookup | Cost tracking | Price table |
+|---|---|---|---|
+| DeepSeek | yes | yes | yes |
+| Moonshot / Kimi | yes | yes | yes |
+| OpenAI / Claude / Grok / Gemini | "unavailable" | yes | yes (configure prices) |
+
+### Uninstall
+
+```sh
+dsh plugin --profile <name> remove @easytz/dsh-ui-balance
+```
+
+### Limitations
+
+- Only DeepSeek and Moonshot/Kimi expose a public balance endpoint; other vendors need one before support can be added.
+- Prices come from local configuration — worth checking against the vendor's pricing page now and then.
+- Pure web UI plus HTTP routes, so it should work everywhere; mainly verified on the Windows desktop build.
+
+## 许可证 / License
+
+[MIT](LICENSE)

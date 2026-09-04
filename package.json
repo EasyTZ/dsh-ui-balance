@@ -1,7 +1,7 @@
 {
   "name": "@easytz/dsh-ui-balance",
-  "version": "0.6.3",
-  "description": "余额面板：显示 DeepSeek 余额、每日/每月花费、用量与价格表，并追踪多提供商成本（Balance panel: DeepSeek balance, daily/monthly spend, usage & pricing tables, and multi-provider cost tracking）",
+  "version": "0.6.4",
+  "description": "余额与费用：DeepSeek 余额、本次/日/周/月花费、各模型用量与实时单价。Balance and cost panel for DeepSeek Harness: balance, spend, per-model usage, live pricing.",
   "type": "module",
   "main": "lib/index.js",
   "exports": {
@@ -59,6 +59,7 @@
   },
   "files": [
     "lib",
-    "cordis.patch.yml"
+    "cordis.patch.yml",
+    "docs"
   ]
 }
