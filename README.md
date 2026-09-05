@@ -1,11 +1,15 @@
-# dsh-ui-balance
+<h1 align="center">dsh-ui-balance</h1>
+<p align="center"><b>把账户余额、token 用量和真实花费放回会话旁边。</b></p>
+<p align="center">余额查询 · 实时估算 · 模型拆分 · 日/周/月汇总 · 峰谷单价</p>
+<p align="center">
+  <a href="https://www.npmjs.com/package/@easytz/dsh-ui-balance"><img alt="npm" src="https://img.shields.io/npm/v/@easytz/dsh-ui-balance?style=flat-square&color=4d6bfe"></a>
+  <img alt="dsh plugin" src="https://img.shields.io/badge/dsh-plugin-17223b?style=flat-square">
+  <img alt="providers" src="https://img.shields.io/badge/providers-DeepSeek%20%7C%20Kimi-2f855a?style=flat-square">
+  <img alt="license" src="https://img.shields.io/badge/license-MIT-8b5cf6?style=flat-square">
+</p>
+<p align="center"><img src="docs/panel.png" alt="余额与花费：用量、费用汇总与实时单价" width="560"></p>
 
-**余额与费用：DeepSeek 余额、本次/日/周/月花费、各模型用量与实时单价。**
-**Balance and cost panel for DeepSeek Harness: balance, spend, per-model usage, live pricing.**
-
-[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（下称 dsh）的第三方插件。聊天过程中不用切到网页查账单，侧边栏和弹窗里就能看到。
-
-![费用详情：余额、用量、费用汇总与实时单价](docs/panel.png)
+> Balance and cost panel for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness): live spend, per-model usage and current pricing beside the conversation.
 
 <details open>
 <summary><b>中文</b></summary>
@@ -26,7 +30,7 @@
 dsh plugin --profile <name> add @easytz/dsh-ui-balance
 ```
 
-`<name>` 是**必填**的 profile 名，不能省略——桌面版通常是 `web`，TUI 是 `tui`；不确定就看 `$DSH_HOME/profiles/` 下的目录名。想钉死版本就写 `@easytz/dsh-ui-balance@0.6.5`。
+`<name>` 是**必填**的 profile 名，不能省略——桌面版通常是 `web`，TUI 是 `tui`；不确定就看 `$DSH_HOME/profiles/` 下的目录名。想钉死版本就写 `@easytz/dsh-ui-balance@0.6.7`。
 
 装完重启 dsh 即可使用。
 

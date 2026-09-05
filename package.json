@@ -1,6 +1,6 @@
 {
   "name": "@easytz/dsh-ui-balance",
-  "version": "0.6.6",
+  "version": "0.6.7",
   "description": "余额与费用：DeepSeek 余额、本次/日/周/月花费、各模型用量与实时单价。Balance and cost panel for DeepSeek Harness: balance, spend, per-model usage, live pricing.",
   "type": "module",
   "main": "lib/index.js",

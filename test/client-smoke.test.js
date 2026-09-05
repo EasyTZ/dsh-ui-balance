@@ -111,8 +111,9 @@ function fakeModelDirectories(selection) {
 	return {
 		directoryFor: () => ({
 			store: {
-				subscribe: () => () => {},
-				getSnapshot: () => ({ current: selection })
+				value: { current: selection },
+				subscribe() { assert.ok(this.value); return () => {}; },
+				getSnapshot() { return this.value; }
 			}
 		})
 	};
@@ -311,6 +312,23 @@ test("冒烟：四个槽都注册到位", async () => {
 		assert.strictEqual(typeof liveProbe.component, "function");
 		assert.strictEqual(typeof button.component, "function");
 		assert.strictEqual(typeof panel.component, "function");
+	} finally {
+		cleanup();
+	}
+});
+
+test("dsh 0.1.2：会话快照尚无 nodes、外部 store 方法依赖 this 时探针不崩", async () => {
+	try {
+		const { mod, captured } = mount();
+		const Probe = captured["conversation.chat.turnTail:balance"].component;
+		const tree = await mod.__render(() => Probe({
+			sessionId: "s1",
+			seq: 1,
+			turn: {},
+			useSession: (selector) => selector({}),
+			modelDirectories: fakeModelDirectories(null)
+		}));
+		assert.strictEqual(tree, null);
 	} finally {
 		cleanup();
 	}
