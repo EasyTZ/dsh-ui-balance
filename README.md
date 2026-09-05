@@ -68,7 +68,7 @@ dsh plugin --profile <name> remove @easytz/dsh-ui-balance
 ## 已知限制
 
 - 余额查询仅 DeepSeek 和 Moonshot/Kimi 有公开接口；其他厂商需要官方提供余额接口后再适配。
-- 价格表数据来自本地配置，建议偶尔核对官方定价页。
+- DeepSeek 官方模型价格会自动从官方定价页同步（启动时抓一次，之后每半天更新，失败时回退本地默认价）；其他供应商价格仍来自本地配置，建议偶尔核对。
 
 ## 平台支持
 
@@ -123,7 +123,7 @@ dsh plugin --profile <name> remove @easytz/dsh-ui-balance
 ### Limitations
 
 - Only DeepSeek and Moonshot/Kimi expose a public balance endpoint; other vendors need one before support can be added.
-- Prices come from local configuration — worth checking against the vendor's pricing page now and then.
+- DeepSeek official model prices are auto-synced from the official pricing page (once at startup, then every half-day, falling back to bundled defaults on failure). Other vendors' prices still come from local configuration — worth checking now and then.
 - Pure web UI plus HTTP routes, so it should work everywhere; mainly verified on the Windows desktop build.
 
 </details>
