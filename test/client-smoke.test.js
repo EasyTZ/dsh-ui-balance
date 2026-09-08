@@ -369,6 +369,34 @@ test("探针不渲染任何东西，按当前选中模型算出花费", async ()
 	});
 });
 
+test("dsh 0.1.2：MessageCostProbe 走 useChat/legacy.nodes 能正常计费", async () => {
+	await withFixedNow(OFF_PEAK_ISO, async () => {
+		try {
+			const { mod, captured, t } = mount();
+			const Probe = captured["conversation.chat.turnTail:balance"].component;
+			const Panel = captured["shell.overlay:balance-panel"].component;
+
+			const node = { kind: "assistant", seq: 1, usage: { inputTokens: 1000, outputTokens: 500, cacheReadTokens: 0 } };
+			const chatSnapshot = { legacy: { nodes: [node] } };
+			const modelDirectories = fakeModelDirectories({ provider: "deepseek-official", model: "deepseek-v4-flash" });
+			const tree = await mod.__render(() => Probe({
+				sessionId: "s1", seq: 1, turn: { start: { time: Date.now() + 10 } },
+				useChat: (selector) => selector(chatSnapshot),
+				modelDirectories
+			}));
+			assert.strictEqual(tree, null, "探针不该渲染任何东西");
+
+			const panelTree = flatten(await mod.__render(() => Panel({ t, store: { subscribe: () => () => {}, getSnapshot: () => true, close() {} } })));
+			const text = textOf(panelTree);
+			// 空闲时段：(1000*1.5 + 500*4.5) / 1e6 = 0.00375，toFixed(4) 四舍五入成 0.0037
+			assert.ok(text.includes("0.0037"), `dsh 0.1.2 的 useChat 探针应能折算花费，实际:\n${text}`);
+		} finally {
+			cleanup();
+		}
+	});
+});
+
+
 test("高峰时段按 2 倍单价折算", async () => {
 	await withFixedNow(PEAK_ISO, async () => {
 		try {
