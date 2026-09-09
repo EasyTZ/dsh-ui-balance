@@ -4,12 +4,13 @@
 // 不能在本轮就调）。
 //
 // 这个文件额外要守的几条是本插件特有的：
-//   1. **浏览器半不再记账**。日/周/月/本次打开四个数字全部来自 host 半的
+//   1. **浏览器半不再记账**。日/周/月三个数字全部来自 host 半的
 //      `/api/dsdesktop/balance/usage`（它从 dsh 的会话事件日志现算）。所以这里的
 //      断言方向变了：不再喂 usage 进去看累加对不对，而是喂一份路由响应进去，看
 //      面板有没有把它原样、分周期地摊出来——顺带守住「浏览器半没有偷偷再算一遍」。
 //   2. 唯一还留在浏览器半的计算是**进行中消息的流式估算**：按字符数估输出 token，
-//      叠在已结算的数字上显示，回合一结束就丢掉、改拉路由。要真的喂 partial 进去。
+//      只叠在侧边栏那一行上（那里要求实时跳动），面板里的费用表是「回合结束后更新」
+//      的结算口径、不带估算。这条分界线两边都要测，要真的喂 partial 进去。
 //   3. 高峰/空闲时段价格差一倍，而 `isPeakHours` 读的是真实系统时钟——测试要
 //      用 `withFixedNow` 把时间钉死，不然这个文件今天绿、高峰时段跑起来就可能
 //      变红（或者反过来，平时绿、一到高峰就红）。
@@ -71,22 +72,27 @@ const PRICING = {
 	}
 };
 
-/** 一格统计（本次打开 / 日 / 周 / 月）的构造器，形状跟 host 半 `aggregate()` 的返回一致。 */
-function period(key, cost, tokens = { input: 0, cacheRead: 0, output: 0 }, model = "deepseek-v4-flash") {
+/**
+ * 一格统计（日 / 周 / 月）的构造器，形状跟 host 半 `aggregate()` 的返回一致。
+ *
+ * `costs` 是按 token 类别拆开的金额，host 半算好后随 perModel 一起下发（面板的费用表
+ * 每类一列）。默认全摊在输出上，这样「三项之和 = 这一行的合计」始终成立——费用表里
+ * 那一行本来就该自己加得起来。
+ */
+function period(key, cost, tokens = { input: 0, cacheRead: 0, output: 0 }, model = "deepseek-v4-flash", costs) {
 	return {
 		key,
 		currency: "CNY",
 		totalCost: cost,
 		perModel: cost === 0 && tokens.input === 0 && tokens.cacheRead === 0 && tokens.output === 0
 			? []
-			: [{ provider: "deepseek-official", model, priced: true, cost, tokens }]
+			: [{ provider: "deepseek-official", model, priced: true, cost, tokens, costs: costs ?? { input: 0, cacheRead: 0, output: cost } }]
 	};
 }
 
 const EMPTY_USAGE = {
 	ok: true,
 	pricing: PRICING,
-	session: period(null, 0),
 	daily: period("2026-09-05", 0),
 	weekly: period("2026-08-31", 0),
 	monthly: period("2026-09", 0)
@@ -276,12 +282,58 @@ function fakeUseSessionSnapshot(snapshot) {
 /** 一个永远开着的面板开关 store。 */
 const OPEN_STORE = { subscribe: () => () => {}, getSnapshot: () => true, close() {} };
 
-/** 从面板里把「费用汇总」那一行的四个金额抠出来：本次打开 / 日 / 周 / 月。 */
-function costCells(tree) {
-	const idx = tree.findIndex((n) => n.props && n.props.children === "balance.cost.title");
-	assert.ok(idx >= 0, "费用汇总表头应该在");
-	return tree.slice(idx + 1).filter((n) => n.type === "td").slice(0, 4).map((n) => n.props.children);
+/** 费用表最后那行「总计」的五个格子：模型列 / 输入未命中 / 缓存命中 / 输出 / 合计。 */
+function totalRow(tree) {
+	const row = tree.find((n) => n.type === "tr" && n.props && n.props.className === "dsbTotalRow");
+	assert.ok(row, "费用表应该有一行总计");
+	return row.props.children.map((td) => td.props.children);
 }
+
+/**
+ * 这个周期一共花了多少：费用表最后一行最右边那格。
+ *
+ * 只有一个模型时没有「总计」那一行（它会跟上面那一行一模一样），所以这里按「费用表
+ * 里最后一行」取，而不是认死 `dsbTotalRow`。五格是费用表的行，下面那张单价表是四格。
+ */
+function costTotal(tree) {
+	const head = tree.findIndex((n) => n.type === "th" && n.props && n.props.children === "balance.cost.table.total");
+	assert.ok(head >= 0, "费用表的表头应该在");
+	const rows = tree.slice(head).filter((n) => n.type === "tr" && Array.isArray(n.props?.children)
+		&& n.props.children.filter((c) => c && c.type === "td").length === 5);
+	assert.ok(rows.length > 0, "费用表应该有内容行");
+	return rows[rows.length - 1].props.children[4].props.children;
+}
+
+/**
+ * 费用表里某个模型那一行的五个格子。
+ *
+ * 从费用表的表头往后找，不能在整棵树里找：上面那张用量表的行长得一模一样（同样的
+ * `dsbPriceModel` 第一格、同样五列），在整棵树里搜必然先撞上用量表那一行。
+ */
+function costRow(tree, label) {
+	const head = tree.findIndex((n) => n.type === "th" && n.props && n.props.children === "balance.cost.table.total");
+	assert.ok(head >= 0, "费用表的表头应该在");
+	const row = tree.slice(head).find((n) => n.type === "tr" && n.props && Array.isArray(n.props.children)
+		&& n.props.className !== "dsbTotalRow"
+		&& n.props.children[0]?.props?.children === label);
+	assert.ok(row, `费用表里应该有 ${label} 那一行`);
+	return row.props.children.map((td) => td.props.children);
+}
+
+/** 侧边栏那一行的花费文字。 */
+function sideCostText(tree) {
+	const node = tree.find((n) => n.props && n.props.className === "dsbSideCost");
+	assert.ok(node, "侧边栏应该有独立的花费那一段");
+	return String(node.props.children);
+}
+
+/** 侧边栏/面板的词条模板：只有真模板才看得出占位符有没有被填上。 */
+const SIDE_T = {
+	"balance.side.balance": "余额：{value}",
+	"balance.side.cost": "花费：{value}/日",
+	"balance.daily.title": "本日费用",
+	"balance.label": "余额"
+};
 
 test("冒烟：三个槽都注册到位，turnTail 上不再挂记账探针", async () => {
 	try {
@@ -308,26 +360,95 @@ test("冒烟：三个槽都注册到位，turnTail 上不再挂记账探针", as
 	}
 });
 
-test("四格数字全部来自 /balance/usage，浏览器半不自己记账", async () => {
+test("三格数字全部来自 /balance/usage，浏览器半不自己记账", async () => {
 	await withFixedNow(OFF_PEAK_ISO, async () => {
 		try {
 			usagePayload = {
 				ok: true,
 				pricing: PRICING,
-				session: period(null, 0.5, { input: 10, cacheRead: 20, output: 30 }),
 				daily: period("2026-09-05", 8.829, { input: 375876, cacheRead: 89487616, output: 155799 }),
 				weekly: period("2026-08-31", 19.5314, { input: 1323247, cacheRead: 152651264, output: 392846 }),
 				monthly: period("2026-09", 163.8268, { input: 2822044, cacheRead: 264601856, output: 800757 })
 			};
 			const { mod, captured, t } = mount();
 			const Panel = captured["shell.overlay:balance-panel"].component;
+			const Button = captured["sidebar.footer.action:balance"].component;
+
+			// 面板：费用表跟着上面那个周期选择器走，默认「日」。
+			const tree = flatten(await mod.__render(() => Panel({ t, store: OPEN_STORE })));
+			assert.strictEqual(costTotal(tree), "8.829 元");
+
+			// 侧边栏：同一个「日」的数字，跟面板同源。
+			const side = flatten(await mod.__render(() => Button({ wide: true, t: tWith(SIDE_T), store: { toggle() {} } })));
+			assert.strictEqual(sideCostText(side), "花费：8.829 元/日");
+
+			// 「本次打开」这个口径没有了，请求里不该再有它的下界——host 半也不再算那一格。
+			assert.ok(usageRequests.length > 0, "应向 /balance/usage 发过请求");
+			assert.ok(usageRequests.every((u) => !u.includes("since=")), `请求不该再带 since 参数，实际: ${usageRequests.join(", ")}`);
+		} finally {
+			cleanup();
+		}
+	});
+});
+
+test("费用汇总按模型分行，每类 token 一列金额，最后一行总计", async () => {
+	await withFixedNow(OFF_PEAK_ISO, async () => {
+		try {
+			// 两个模型、三类金额都不同：真出现串列（拿输出的钱填了缓存那一格）当场露馅。
+			usagePayload = {
+				ok: true,
+				pricing: PRICING,
+				daily: {
+					key: "2026-09-05",
+					currency: "CNY",
+					totalCost: 3.75,
+					perModel: [
+						{ provider: "deepseek-official", model: "deepseek-v4-flash", priced: true, cost: 1.11, tokens: { input: 100, cacheRead: 200, output: 300 }, costs: { input: 0.5, cacheRead: 0.01, output: 0.6 } },
+						{ provider: "deepseek-official", model: "deepseek-v4-pro", priced: true, cost: 2.64, tokens: { input: 10, cacheRead: 20, output: 30 }, costs: { input: 1.2, cacheRead: 0.04, output: 1.4 } }
+					]
+				},
+				weekly: period("2026-08-31", 0),
+				monthly: period("2026-09", 0)
+			};
+			const { mod, captured, t } = mount();
+			const Panel = captured["shell.overlay:balance-panel"].component;
 			const tree = flatten(await mod.__render(() => Panel({ t, store: OPEN_STORE })));
 
-			assert.deepStrictEqual(costCells(tree), ["0.50 元", "8.829 元", "19.5314 元", "163.8268 元"]);
+			assert.deepStrictEqual(costRow(tree, "deepseek-v4-flash"),
+				["deepseek-v4-flash", "0.50 元", "0.01 元", "0.60 元", "1.11 元"]);
+			assert.deepStrictEqual(costRow(tree, "deepseek-v4-pro"),
+				["deepseek-v4-pro", "1.20 元", "0.04 元", "1.40 元", "2.64 元"]);
+			// 总计的三个分项是各行相加，最右边那格取周期自己的 totalCost（跟 host 半同源）。
+			assert.deepStrictEqual(totalRow(tree),
+				["balance.cost.table.all", "1.70 元", "0.05 元", "2.00 元", "3.75 元"]);
 
-			// 请求必须带上「本次打开」的下界，否则 host 半没法算那一格。
-			assert.ok(usageRequests.length > 0, "应向 /balance/usage 发过请求");
-			assert.match(usageRequests[0], /[?&]since=\d+/, `请求应带 since 参数，实际: ${usageRequests[0]}`);
+			// 表头跟用量表逐列对齐，只有第五列不同：用量那边是缓存命中率，费用这边没有
+			// 对应的比率概念，换成这一行的合计。
+			const heads = tree.filter((n) => n.type === "th").map((n) => n.props.children);
+			assert.deepStrictEqual(heads.slice(0, 5),
+				["balance.price.table.model", "balance.usage.table.input", "balance.usage.table.hit", "balance.usage.table.output", "balance.usage.table.hit_rate"]);
+			assert.deepStrictEqual(heads.slice(5, 10),
+				["balance.price.table.model", "balance.usage.table.input", "balance.usage.table.hit", "balance.usage.table.output", "balance.cost.table.total"]);
+		} finally {
+			cleanup();
+		}
+	});
+});
+
+test("详情面板里没有「本次打开」：既没有那张用量表，也没有那一格费用", async () => {
+	await withFixedNow(OFF_PEAK_ISO, async () => {
+		try {
+			usagePayload = { ...EMPTY_USAGE, daily: period("2026-09-05", 1, { input: 1, cacheRead: 0, output: 1 }) };
+			const { mod, captured, t } = mount();
+			const Panel = captured["shell.overlay:balance-panel"].component;
+			const tree = flatten(await mod.__render(() => Panel({ t, store: OPEN_STORE })));
+			const text = textOf(tree);
+
+			assert.ok(!text.includes("balance.usage.title"), "「本次打开用量」那一节应该删掉了");
+			assert.ok(!text.includes("balance.cost.title"), "「本次打开花费」那一格应该删掉了");
+			// 用量表只剩一张（汇总那张）：两张表的表头一样，数一下模型列的表头就知道。
+			const usageHeads = tree.filter((n) => n.type === "th" && n.props.children === "balance.usage.table.hit_rate");
+			assert.strictEqual(usageHeads.length, 1, "用量表应该只剩「用量汇总」那一张");
 		} finally {
 			cleanup();
 		}
@@ -341,7 +462,6 @@ test("用量汇总按日/周/月三个周期各出一张表，默认看「日」
 			usagePayload = {
 				ok: true,
 				pricing: PRICING,
-				session: period(null, 0),
 				daily: period("2026-09-05", 1, { input: 1111, cacheRead: 10, output: 20 }),
 				weekly: period("2026-08-31", 2, { input: 2222, cacheRead: 10, output: 20 }),
 				monthly: period("2026-09", 3, { input: 3333, cacheRead: 10, output: 20 })
@@ -354,8 +474,15 @@ test("用量汇总按日/周/月三个周期各出一张表，默认看「日」
 			assert.ok(textOf(tree).includes("1,111"), "默认应看「日」那份");
 			assert.ok(!textOf(tree).includes("2,222"), "默认不该同时摊出周的数字");
 
+			// 费用表跟用量表共用这一个选择器，所以默认也是「日」那份。
+			assert.strictEqual(costTotal(tree), "1.00 元", "费用表默认也该是「日」");
+			// 只有一个模型时不出「总计」那一行：它会跟上面那一行一模一样，两行并排像
+			// 是渲染坏了，而那个数并没有因此消失。
+			assert.ok(!tree.some((n) => n.props && n.props.className === "dsbTotalRow"),
+				"只有一个模型时不该出总计那一行");
+
 			const tabs = tree.filter((n) => n.props && n.props.role === "tab");
-			assert.strictEqual(tabs.length, 3, "日/周/月三个分段");
+			assert.strictEqual(tabs.length, 3, "日/周/月三个分段，只此一处");
 			// 分段控件是受控的：点一下改 useState，下一轮渲染才换数据源。
 			tree = flatten(await mod.__render(() => {
 				const node = Panel({ t, store: OPEN_STORE });
@@ -364,6 +491,8 @@ test("用量汇总按日/周/月三个周期各出一张表，默认看「日」
 				return node;
 			}));
 			assert.ok(textOf(tree).includes("2,222"), `点「周」之后应换成周的数字，实际: ${textOf(tree).slice(0, 400)}`);
+			// **同一个选择器管两张表**：切到「周」之后费用表也得跟着换，不能还挂着日的数字。
+			assert.strictEqual(costTotal(tree), "2.00 元", "切周期后费用表也该跟着换");
 		} finally {
 			cleanup();
 		}
@@ -375,13 +504,12 @@ function deepFlattenOnce(node) {
 	return node;
 }
 
-test("流式生成期间的估算叠在已结算数字上，回合结束后丢掉估算并重新拉取", async () => {
+test("流式估算只叠在侧边栏那一行上，面板里的费用表按结算口径不动", async () => {
 	await withFixedNow(OFF_PEAK_ISO, async () => {
 		try {
 			usagePayload = {
 				ok: true,
 				pricing: PRICING,
-				session: period(null, 1, { input: 1, cacheRead: 0, output: 1 }),
 				daily: period("2026-09-05", 1, { input: 1, cacheRead: 0, output: 1 }),
 				weekly: period("2026-08-31", 1, { input: 1, cacheRead: 0, output: 1 }),
 				monthly: period("2026-09", 1, { input: 1, cacheRead: 0, output: 1 })
@@ -389,7 +517,9 @@ test("流式生成期间的估算叠在已结算数字上，回合结束后丢�
 			const { mod, captured, t } = mount();
 			const LiveProbe = captured["conversation.session.header.actions:balance-live"].component;
 			const Panel = captured["shell.overlay:balance-panel"].component;
+			const Button = captured["sidebar.footer.action:balance"].component;
 			const modelDirectories = fakeModelDirectories({ provider: "deepseek-official", model: "deepseek-v4-flash" });
+			const side = async () => sideCostText(flatten(await mod.__render(() => Button({ wide: true, t: tWith(SIDE_T), store: { toggle() {} } }))));
 
 			// 1000 个 CJK 字符，按我们的启发式 = 1000 个输出 token。
 			// 空闲时段 1000 * 4.5 / 1e6 = 0.0045，叠在已结算的 1 上。
@@ -401,9 +531,11 @@ test("流式生成期间的估算叠在已结算数字上，回合结束后丢�
 			}));
 			assert.strictEqual(tree, null, "实时探针不该渲染任何东西");
 
-			let cells = costCells(flatten(await mod.__render(() => Panel({ t, store: OPEN_STORE }))));
-			assert.strictEqual(cells[0], "1.0045 元", `本次打开应叠上进行中的估算，实际: ${cells[0]}`);
-			assert.strictEqual(cells[1], "1.0045 元", `本日同理，实际: ${cells[1]}`);
+			assert.strictEqual(await side(), "花费：1.0045 元/日", "侧边栏要实时跳动，得叠上进行中的估算");
+			// 面板是「回合结束后更新」的结算口径：估算只有输出、没有输入与缓存，混进去
+			// 会让按类别分的那几列失真。
+			const panel = flatten(await mod.__render(() => Panel({ t, store: OPEN_STORE })));
+			assert.strictEqual(costTotal(panel), "1.00 元", "费用表不该把估算算进去");
 
 			// 回合结束：partial 消失。估算立刻丢掉——精确值由 host 半从会话日志读，
 			// 不再像旧版那样把估算「折进累计」（那正是重复计费的来源）。
@@ -412,13 +544,15 @@ test("流式生成期间的估算叠在已结算数字上，回合结束后丢�
 				useSession: fakeUseSessionSnapshot({ nodes: [], partial: null, turnTimings: undefined }),
 				modelDirectories
 			}));
-			cells = costCells(flatten(await mod.__render(() => Panel({ t, store: OPEN_STORE }))));
-			assert.strictEqual(cells[0], "1.00 元", `估算应被丢掉而不是折进累计，实际: ${cells[0]}`);
+			assert.strictEqual(await side(), "花费：1.00 元/日", "估算应被丢掉而不是折进累计");
 
-			// 并且要安排一次重新拉取，把日志里那条精确的读回来。
+			// 并且要安排一次**强制**重新拉取，把日志里那条精确的读回来：host 半的扫描
+			// 结果有 5 秒节流，不带 force 的那一发返回的正是「这条还没算进去」的旧数字。
 			const before = usageRequests.length;
-			await new Promise((r) => setTimeout(r, 1800));
+			await new Promise((r) => setTimeout(r, 1600));
 			assert.ok(usageRequests.length > before, "回合结束后应重新拉一次统计");
+			assert.ok(usageRequests.slice(before).some((u) => u.includes("force=1")),
+				`补拉那一发必须带 force=1，实际: ${usageRequests.slice(before).join(", ")}`);
 		} finally {
 			cleanup();
 		}
@@ -428,17 +562,17 @@ test("流式生成期间的估算叠在已结算数字上，回合结束后丢�
 test("高峰时段的流式估算按倍率折算", async () => {
 	await withFixedNow(PEAK_ISO, async () => {
 		try {
-			const { mod, captured, t } = mount();
+			const { mod, captured } = mount();
 			const LiveProbe = captured["conversation.session.header.actions:balance-live"].component;
-			const Panel = captured["shell.overlay:balance-panel"].component;
+			const Button = captured["sidebar.footer.action:balance"].component;
 			const partial = { turn: 7, step: 1, blocks: [{ kind: "text", text: "你".repeat(1000) }] };
 			await mod.__render(() => LiveProbe({
 				sessionId: "s1",
 				useSession: fakeUseSessionSnapshot({ nodes: [], partial, turnTimings: undefined }),
 				modelDirectories: fakeModelDirectories({ provider: "deepseek-official", model: "deepseek-v4-flash" })
 			}));
-			const cells = costCells(flatten(await mod.__render(() => Panel({ t, store: OPEN_STORE }))));
-			assert.strictEqual(cells[0], "0.009 元", `高峰应是空闲价的 2 倍，实际: ${cells[0]}`);
+			const text = sideCostText(flatten(await mod.__render(() => Button({ wide: true, t: tWith(SIDE_T), store: { toggle() {} } }))));
+			assert.strictEqual(text, "花费：0.009 元/日", "高峰应是空闲价的 2 倍");
 		} finally {
 			cleanup();
 		}
@@ -448,32 +582,33 @@ test("高峰时段的流式估算按倍率折算", async () => {
 test("翻旧会话翻出来的进行中回合（开始于本次启动之前）不产生估算", async () => {
 	await withFixedNow(OFF_PEAK_ISO, async () => {
 		try {
-			const { mod, captured, t } = mount();
+			const { mod, captured } = mount();
 			const LiveProbe = captured["conversation.session.header.actions:balance-live"].component;
-			const Panel = captured["shell.overlay:balance-panel"].component;
+			const Button = captured["sidebar.footer.action:balance"].component;
 			const partial = { turn: 7, step: 1, blocks: [{ kind: "text", text: "你".repeat(1000) }] };
-			// turn 的开始时刻早于 appOpenTime（= 被钉死的 now）。
+			// turn 的开始时刻早于 appOpenTime（= 被钉死的 now）。真在生成的回合活不过一次
+			// 重启，这种 partial 十有八九是从磁盘恢复出来的残留——给它记一笔估算就再没人
+			// 来撤销，那笔钱会一直挂在今天的数字上。
 			const turnTimings = new Map([[7, { startTime: Date.now() - 60_000 }]]);
 			await mod.__render(() => LiveProbe({
 				sessionId: "s1",
 				useSession: fakeUseSessionSnapshot({ nodes: [], partial, turnTimings }),
 				modelDirectories: fakeModelDirectories({ provider: "deepseek-official", model: "deepseek-v4-flash" })
 			}));
-			const cells = costCells(flatten(await mod.__render(() => Panel({ t, store: OPEN_STORE }))));
-			assert.strictEqual(cells[0], "0.00 元", `历史回合不该产生「本次打开」的估算，实际: ${cells[0]}`);
+			const text = sideCostText(flatten(await mod.__render(() => Button({ wide: true, t: tWith(SIDE_T), store: { toggle() {} } }))));
+			assert.strictEqual(text, "花费：0.00 元/日", "早于本次启动的回合不该产生估算");
 		} finally {
 			cleanup();
 		}
 	});
 });
 
-test("标题栏的重置要二次确认：确认后把清零下限写到 host，并清掉「本次打开」", async () => {
+test("标题栏的重置要二次确认：确认后把当前周期的清零下限写到 host", async () => {
 	await withFixedNow(OFF_PEAK_ISO, async () => {
 		try {
 			usagePayload = {
 				ok: true,
 				pricing: PRICING,
-				session: period(null, 5, { input: 1, cacheRead: 0, output: 1 }),
 				daily: period("2026-09-05", 5, { input: 1, cacheRead: 0, output: 1 }),
 				weekly: period("2026-08-31", 5, { input: 1, cacheRead: 0, output: 1 }),
 				monthly: period("2026-09", 5, { input: 1, cacheRead: 0, output: 1 })
@@ -492,12 +627,10 @@ test("标题栏的重置要二次确认：确认后把清零下限写到 host，
 			assert.strictEqual(resetPosts.length, 0, "只点「重置」不该写任何东西到 host");
 			assert.ok(tree.some((n) => n.props && n.props.role === "alertdialog"), "应举起二次确认条");
 
-			const sinceBefore = JSON.parse(storage.getItem("dsh-ui-balance/spendSince/v1"));
-
-			// 点确认：写清零下限到 host（当前选中周期是「日」），本地的「本次打开」下界抬到当下。
-			// 确认条要等 setConfirmReset 触发的下一轮渲染才出现，所以这里按「有确认条就点
-			// 确认、没有就点重置」写，让迷你 React 的收敛循环自己走完两轮。
-			usagePayload = { ...usagePayload, session: period(null, 0), daily: period("2026-09-05", 0) };
+			// 点确认：写清零下限到 host（当前选中周期是「日」）。确认条要等 setConfirmReset
+			// 触发的下一轮渲染才出现，所以这里按「有确认条就点确认、没有就点重置」写，
+			// 让迷你 React 的收敛循环自己走完两轮。
+			usagePayload = { ...usagePayload, daily: period("2026-09-05", 0) };
 			let armed = false;
 			let confirmed = false;
 			await mod.__render(() => {
@@ -516,12 +649,12 @@ test("标题栏的重置要二次确认：确认后把清零下限写到 host，
 			await new Promise((r) => setTimeout(r, 0));
 
 			assert.deepStrictEqual(resetPosts, [{ period: "day" }], `确认后应把「日」的清零下限写到 host，实际: ${JSON.stringify(resetPosts)}`);
-			const sinceAfter = JSON.parse(storage.getItem("dsh-ui-balance/spendSince/v1"));
-			assert.ok(sinceAfter >= sinceBefore, "「本次打开」的下界应被抬到当下");
 
-			const cells = costCells(flatten(await mod.__render(() => Panel({ t, store: OPEN_STORE }))));
-			assert.strictEqual(cells[0], "0.00 元", `清零后「本次打开」应归零，实际: ${cells[0]}`);
-			assert.strictEqual(cells[1], "0.00 元", `清零后「本日」应归零，实际: ${cells[1]}`);
+			// 清零后「日」这一格没有任何模型了，费用表整张换成那句空态文案。
+			const after = textOf(flatten(await mod.__render(() => Panel({ t, store: OPEN_STORE }))));
+			assert.ok(after.includes("balance.cost.summary.empty"), `清零后「日」应归零，实际: ${after.slice(0, 300)}`);
+			// 清零下限刚写下去，得强制刷一次：不然界面上还是节流窗口里那个旧快照。
+			assert.ok(usageRequests.some((u) => u.includes("force=1")), "清零后应强制刷新一次");
 		} finally {
 			cleanup();
 		}
@@ -572,12 +705,13 @@ function tWith(templates) {
 	return (k) => templates[k] ?? k;
 }
 
-test("展开态：余额与花费是分开的两段，中间由 CSS 撑出空隙", async () => {
+test("展开态：「余额：x 元」和「花费：y 元/日」是分开的两段，中间由 CSS 撑出空隙", async () => {
 	await withFixedNow(OFF_PEAK_ISO, async () => {
 		try {
-			usagePayload = { ...EMPTY_USAGE, session: period(null, 0.0037, { input: 1000, cacheRead: 0, output: 500 }) };
-			const { mod, captured, t } = mount();
+			usagePayload = { ...EMPTY_USAGE, daily: period("2026-09-05", 0.0037, { input: 1000, cacheRead: 0, output: 500 }) };
+			const { mod, captured } = mount();
 			const Button = captured["sidebar.footer.action:balance"].component;
+			const t = tWith(SIDE_T);
 
 			const tree = flatten(await mod.__render(() => Button({ wide: true, t, store: { toggle() {} } })));
 			const btn = tree.find((n) => n.type === "button");
@@ -589,19 +723,16 @@ test("展开态：余额与花费是分开的两段，中间由 CSS 撑出空隙
 			const costNode = tree.find((n) => n.props && n.props.className === "dsbSideCost");
 			assert.ok(bal, "余额应该是独立的一段");
 			assert.ok(costNode, "花费应该是独立的一段");
-			assert.match(String(bal.props.children), /balance\.label/, "第一段是余额");
-			assert.ok(String(bal.props.children).includes("12.34"), `第一段要带上余额数字，实际: ${bal.props.children}`);
+			assert.strictEqual(String(bal.props.children), "余额：12.34 元");
 
-			// 花费的算法必须跟面板里那一行同源：同样是 0.0037，不是另算一份。
-			assert.ok(String(costNode.props.children).includes("0.0037 元"),
-				`侧边栏花费应与面板同源（0.0037 元），实际: ${costNode.props.children}`);
+			// 花费那一段显示的是**本日**花费，而且带上量纲「/日」——不写单位很容易被
+			// 当成账户累计消费。
+			assert.strictEqual(String(costNode.props.children), "花费：0.0037 元/日");
 
-			// 可视标签用短的（「花费」），紧挨着「余额」就能读懂；title/aria 用完整
-			// 那句（「本次打开花费（预估）」）——悬浮提示没有那个上下文，而折叠成图标
-			// 时它更是唯一能读到这两个数的地方。两者刻意不同，别顺手改成同一个 key。
-			assert.match(String(costNode.props.children), /^balance\.cost\.short /,
-				`可视标签应该是短的那个词条，实际: ${costNode.props.children}`);
-			assert.ok(btn.props.title.includes("balance.label") && btn.props.title.includes("balance.cost.title"),
+			// title/aria 用完整那句（「本日费用 …」）：可视标签靠紧挨着「余额」的上下文
+			// 加一个量纲就够读懂，悬浮提示没有那个上下文，折叠成图标时它更是唯一能读到
+			// 这两个数的地方。两者刻意不同，别顺手改成同一个 key。
+			assert.ok(btn.props.title.includes("余额：12.34 元") && btn.props.title.includes("本日费用 0.0037 元"),
 				`title 应换用完整那句词条，实际: ${btn.props.title}`);
 		} finally {
 			cleanup();
@@ -616,7 +747,7 @@ test("目前单价每行带单位，数字不能把浮点误差原样摊出来",
 			const pricing = { currency: "USD", peakMultiplier: 1.3, modelPricing: { "deepseek-official:deepseek-v4-flash": { cacheHitPerMillion: 0.7, cacheMissPerMillion: 1.5, outputPerMillion: 4.5 } } };
 			globalThis.fetch = (url) => (String(url).endsWith("/balance/pricing")
 				? Promise.resolve({ ok: true, json: async () => ({ ok: true, pricing }) })
-				: Promise.resolve({ ok: true, json: async () => ({ ok: true, value: { balance_infos: [] }, pricing, session: period(null, 0), daily: period("d", 0), weekly: period("w", 0), monthly: period("m", 0) }) }));
+				: Promise.resolve({ ok: true, json: async () => ({ ok: true, value: { balance_infos: [] }, pricing, daily: period("d", 0), weekly: period("w", 0), monthly: period("m", 0) }) }));
 			const Panel = captured["shell.overlay:balance-panel"].component;
 			const t = tWith({ "balance.price.title": "单价（{period}）", "balance.price.peak": "高峰时段", "balance.price.offpeak": "空闲时段", "balance.price.table.model": "模型", "balance.price.table.hit": "命中", "balance.price.table.miss": "未命中", "balance.price.table.output": "输出（每百万 token）" });
 			const text = textOf(flatten(await mod.__render(() => Panel({ t, store: OPEN_STORE }))));
@@ -655,15 +786,401 @@ test("还没产生花费时显示 0 而不是「—」，且带上单价表的�
 
 			// 一笔花费都没有：「—」在这个面板里的含义是「读不出来」，而这里是个
 			// 确定的事实——没花钱。
-			const btnTree = flatten(await mod.__render(() => Button({ wide: true, t, store: { toggle() {} } })));
-			const costNode = btnTree.find((n) => n.props && n.props.className === "dsbSideCost");
-			assert.ok(costNode, "花费那一段应该在");
-			assert.strictEqual(costNode.props.children, "balance.cost.short 0.00 元",
-				`没花过钱时应显示 0（币种取自单价表），实际: ${costNode.props.children}`);
+			const btnTree = flatten(await mod.__render(() => Button({ wide: true, t: tWith(SIDE_T), store: { toggle() {} } })));
+			assert.strictEqual(sideCostText(btnTree), "花费：0.00 元/日",
+				"没花过钱时应显示 0（币种取自单价表）");
 
-			// 面板里那一行必须跟侧边栏同源，不能一个显示 0、另一个显示「—」。
-			const cells = costCells(flatten(await mod.__render(() => Panel({ t, store: OPEN_STORE }))));
-			assert.strictEqual(cells[0], "0.00 元", `面板里那一行应与侧边栏同源，实际: ${cells[0]}`);
+			// 面板里那张表则是整张换成空态文案——一张只有「总计 0.00 元」的表比一句话
+			// 更难读，而且「这个周期没有任何模型产生用量」本身就是要说的那件事。
+			const text = textOf(flatten(await mod.__render(() => Panel({ t, store: OPEN_STORE }))));
+			assert.ok(text.includes("balance.cost.summary.empty"), `没有用量时应显示空态文案，实际: ${text.slice(0, 300)}`);
+		} finally {
+			cleanup();
+		}
+	});
+});
+
+/** 面板里所有注释行（`.dsbNote`）的文字，带上它是不是警示色。 */
+function notesOf(tree) {
+	return tree
+		.filter((n) => n.props && typeof n.props.className === "string" && n.props.className.startsWith("dsbNote"))
+		.map((n) => ({
+			warn: n.props.className.includes("dsbWarn"),
+			text: Array.isArray(n.props.children)
+				? n.props.children.map((c) => (typeof c === "string" ? c : c?.props?.children ?? "")).join("")
+				: String(n.props.children ?? "")
+		}));
+}
+
+const SYNC_T = {
+	"balance.price.synced": "单价同步于 {when}",
+	"balance.price.stale": "单价已 {age}没能同步（{reason}），现在用的是 {when} 那份",
+	"balance.price.never": "没能同步到官方单价，正在使用插件内置的默认价",
+	"balance.price.error.parse": "定价页结构变了，解析不出来",
+	"balance.price.error.network": "定价页打不开",
+	"balance.price.effective": "自 {when} 起生效",
+	"balance.price.pending": "已抓到一份 {when} 起生效的新价，还没开始套用",
+	"balance.age.days": "{n} 天",
+	"balance.age.hours": "{n} 小时",
+	"balance.cost.price_change": "本周期跨越了 {count} 张价表，每条消息都按它发生时的单价计算"
+};
+
+/** 一份「一切正常」的同步状态，各用例只改自己关心的那几个字段。 */
+function syncStatus(overrides) {
+	return {
+		source: "official",
+		syncedAt: Date.now() - 3600_000,
+		attemptedAt: Date.now(),
+		error: null,
+		stale: false,
+		peak: true,
+		effectiveFrom: Date.now() - 3600_000,
+		effectiveFromSource: "seen",
+		pendingFrom: [],
+		...overrides
+	};
+}
+
+test("单价同步正常时只有一行安静的「同步于 x」，不摆警示", async () => {
+	await withFixedNow(OFF_PEAK_ISO, async () => {
+		try {
+			usagePayload = { ...EMPTY_USAGE, pricingStatus: syncStatus({}) };
+			const { mod, captured } = mount();
+			const Panel = captured["shell.overlay:balance-panel"].component;
+			const tree = flatten(await mod.__render(() => Panel({ t: tWith(SYNC_T), store: OPEN_STORE })));
+			const notes = notesOf(tree);
+			assert.ok(notes.some((n) => !n.warn && n.text.startsWith("单价同步于")), `应有一行安静的同步说明，实际: ${JSON.stringify(notes)}`);
+			assert.ok(!notes.some((n) => n.warn), `一切正常时不该有警示行，实际: ${JSON.stringify(notes)}`);
+		} finally {
+			cleanup();
+		}
+	});
+});
+
+test("单价同步不上时摆一行警示，说清多久没同步、为什么、现在用的是哪份", async () => {
+	await withFixedNow(OFF_PEAK_ISO, async () => {
+		try {
+			const syncedAt = Date.now() - 3 * 24 * 3600_000;
+			usagePayload = {
+				...EMPTY_USAGE,
+				pricingStatus: syncStatus({ syncedAt, error: "parse", stale: true, effectiveFrom: syncedAt })
+			};
+			const { mod, captured } = mount();
+			const Panel = captured["shell.overlay:balance-panel"].component;
+			const tree = flatten(await mod.__render(() => Panel({ t: tWith(SYNC_T), store: OPEN_STORE })));
+			const warn = notesOf(tree).find((n) => n.warn);
+			assert.ok(warn, "同步不上必须在界面上说出来——它是安静失败，数字上看不出来");
+			assert.ok(warn.text.includes("3 天"), `要说清多久没同步，实际: ${warn.text}`);
+			assert.ok(warn.text.includes("定价页结构变了"), `要区分「打不开」和「解析不出来」，实际: ${warn.text}`);
+		} finally {
+			cleanup();
+		}
+	});
+});
+
+test("从没同步成功过时说明正在用内置默认价", async () => {
+	await withFixedNow(OFF_PEAK_ISO, async () => {
+		try {
+			usagePayload = {
+				...EMPTY_USAGE,
+				pricingStatus: syncStatus({ source: "default", syncedAt: null, error: "network", stale: true, effectiveFrom: null })
+			};
+			const { mod, captured } = mount();
+			const Panel = captured["shell.overlay:balance-panel"].component;
+			const tree = flatten(await mod.__render(() => Panel({ t: tWith(SYNC_T), store: OPEN_STORE })));
+			const warn = notesOf(tree).find((n) => n.warn);
+			assert.ok(warn?.text.includes("内置的默认价"), `实际: ${JSON.stringify(notesOf(tree))}`);
+		} finally {
+			cleanup();
+		}
+	});
+});
+
+test("手工校准过生效时刻、以及抓到一份还没生效的新价，都要说出来", async () => {
+	await withFixedNow(OFF_PEAK_ISO, async () => {
+		try {
+			const pending = Date.now() + 86400_000;
+			usagePayload = {
+				...EMPTY_USAGE,
+				pricingStatus: syncStatus({
+					effectiveFrom: Date.now() - 86400_000,
+					effectiveFromSource: "config",
+					pendingFrom: [pending]
+				})
+			};
+			const { mod, captured } = mount();
+			const Panel = captured["shell.overlay:balance-panel"].component;
+			const tree = flatten(await mod.__render(() => Panel({ t: tWith(SYNC_T), store: OPEN_STORE })));
+			const notes = notesOf(tree);
+			assert.ok(notes.some((n) => n.text.includes("起生效") && n.text.includes("同步于")),
+				`手工校准过就该把生效时刻一起说出来，实际: ${JSON.stringify(notes)}`);
+			assert.ok(notes.some((n) => n.text.includes("还没开始套用")),
+				`抓到一份未生效的新价要说明，实际: ${JSON.stringify(notes)}`);
+		} finally {
+			cleanup();
+		}
+	});
+});
+
+test("周期跨越调价时说明「每条消息按它发生时的单价算」", async () => {
+	await withFixedNow(OFF_PEAK_ISO, async () => {
+		try {
+			const daily = period("2026-09-05", 1, { input: 1, cacheRead: 0, output: 1 });
+			usagePayload = {
+				...EMPTY_USAGE,
+				daily: { ...daily, priceChanges: [Date.now() - 5 * 86400_000, Date.now() - 86400_000] }
+			};
+			const { mod, captured } = mount();
+			const Panel = captured["shell.overlay:balance-panel"].component;
+			const tree = flatten(await mod.__render(() => Panel({ t: tWith(SYNC_T), store: OPEN_STORE })));
+			const warn = notesOf(tree).find((n) => n.warn);
+			assert.ok(warn?.text.includes("2 张价表"),
+				`跨了调价要说明，否则数字整体变一档像是算错了，实际: ${JSON.stringify(notesOf(tree))}`);
+			cleanup();
+
+			// 只用到一张价表时不该有这句——大多数时候都是这种情况，天天挂着一行说明是噪音。
+			usagePayload = { ...EMPTY_USAGE, daily: { ...daily, priceChanges: [Date.now() - 86400_000] } };
+			const second = mount();
+			const tree2 = flatten(await second.mod.__render(() => second.captured["shell.overlay:balance-panel"].component({ t: tWith(SYNC_T), store: OPEN_STORE })));
+			assert.ok(!notesOf(tree2).some((n) => n.text.includes("张价表")), "没跨调价就不该有这句");
+		} finally {
+			cleanup();
+		}
+	});
+});
+
+test("面板把高峰时段那句规则写出来，手工配的还要转警示色", async () => {
+	await withFixedNow(OFF_PEAK_ISO, async () => {
+		try {
+			const T = {
+				...SYNC_T,
+				"balance.price.window": "高峰时段：{days} {windows}（北京时间）",
+				"balance.price.days_range": "{from}至{to}",
+				"balance.price.weekday.1": "周一",
+				"balance.price.weekday.5": "周五",
+				"balance.price.window_config": "手工配置",
+				"balance.price.window_dates": "另有 {offPeak} 天整天按空闲、{peak} 天按工作日",
+				"balance.price.holiday_peak": "法定节假日按高峰",
+				"balance.price.holiday_offpeak": "法定节假日按空闲",
+				"balance.price.holiday_calendar": "依据 {years} 年放假安排",
+				"balance.price.holiday_calendar_failed": "放假安排取不到（{reason}），节假日暂按高峰计",
+				"balance.price.unmodelled": "定价页这句话里有插件没读懂的计费规则，请核对：{note}"
+			};
+			usagePayload = {
+				...EMPTY_USAGE,
+				pricingStatus: syncStatus({
+					schedule: { days: [1, 2, 3, 4, 5], windows: [[540, 720], [840, 1080]], source: "official", offPeakDates: 0, peakDates: 0 }
+				})
+			};
+			const { mod, captured } = mount();
+			const Panel = captured["shell.overlay:balance-panel"].component;
+			let notes = notesOf(flatten(await mod.__render(() => Panel({ t: tWith(T), store: OPEN_STORE }))));
+			const window = notes.find((n) => n.text.startsWith("高峰时段："));
+			assert.ok(window, `规则本身必须写出来——同一笔用量按峰还是按谷差一倍钱，实际: ${JSON.stringify(notes)}`);
+			assert.strictEqual(window.text, "高峰时段：周一至周五 9:00–12:00、14:00–18:00（北京时间） · 法定节假日按高峰",
+				"节假日算不算高峰是用户一定会问、数字上又完全看不出来的事，得写在脸上");
+			assert.strictEqual(window.warn, false, "跟官方页一致时不必报警");
+			cleanup();
+
+			// 手工覆盖过：转警示色，并把「覆盖了几天」也说出来。
+			usagePayload = {
+				...EMPTY_USAGE,
+				pricingStatus: syncStatus({
+					schedule: { days: [1, 2, 3, 4, 5], windows: [[510, 720]], source: "config", offPeakDates: 7, peakDates: 1 }
+				})
+			};
+			const second = mount();
+			notes = notesOf(flatten(await second.mod.__render(() => second.captured["shell.overlay:balance-panel"].component({ t: tWith(T), store: OPEN_STORE }))));
+			const tuned = notes.find((n) => n.text.startsWith("高峰时段："));
+			assert.ok(tuned?.warn, `手工覆盖过官方规则要看得出来，实际: ${JSON.stringify(notes)}`);
+			assert.ok(tuned.text.includes("8:30–12:00"), `实际: ${tuned.text}`);
+			assert.ok(tuned.text.includes("手工配置") && tuned.text.includes("另有 7 天"), `实际: ${tuned.text}`);
+			cleanup();
+
+			// 只用日期覆盖（节假日）也是「我不按官方那句话算」的声明，同样要转警示色。
+			usagePayload = {
+				...EMPTY_USAGE,
+				pricingStatus: syncStatus({
+					schedule: { days: [1, 2, 3, 4, 5], windows: [[540, 720]], source: "official", offPeakDates: 7, peakDates: 0 }
+				})
+			};
+			const third = mount();
+			notes = notesOf(flatten(await third.mod.__render(() => third.captured["shell.overlay:balance-panel"].component({ t: tWith(T), store: OPEN_STORE }))));
+			const dated = notes.find((n) => n.text.startsWith("高峰时段："));
+			assert.ok(dated?.warn, `拿日期整天覆盖过也要看得出来，实际: ${JSON.stringify(notes)}`);
+		} finally {
+			cleanup();
+		}
+	});
+});
+
+test("节假日口径写在脸上；官方改口之后面板跟着说「按空闲」并注明依据", async () => {
+	await withFixedNow(OFF_PEAK_ISO, async () => {
+		try {
+			const T = {
+				...SYNC_T,
+				"balance.price.window": "高峰时段：{days} {windows}（北京时间）",
+				"balance.price.days_range": "{from}至{to}",
+				"balance.price.weekday.1": "周一",
+				"balance.price.weekday.5": "周五",
+				"balance.price.holiday_peak": "法定节假日按高峰",
+				"balance.price.holiday_offpeak": "法定节假日按空闲",
+				"balance.price.holiday_calendar": "依据 {years} 年放假安排",
+				"balance.price.holiday_calendar_failed": "放假安排取不到（{reason}），节假日暂按高峰计",
+				"balance.price.error.network": "定价页打不开"
+			};
+			const schedule = (extra) => ({
+				days: [1, 2, 3, 4, 5], windows: [[540, 720]], source: "official",
+				offPeakDates: 0, peakDates: 0, holidays: "peak", holidaySource: "official",
+				note: null, unmodelled: false, calendar: null, ...extra
+			});
+			const render = async (status) => {
+				usagePayload = { ...EMPTY_USAGE, pricingStatus: syncStatus(status) };
+				const { mod, captured } = mount();
+				const tree = flatten(await mod.__render(() => captured["shell.overlay:balance-panel"].component({ t: tWith(T), store: OPEN_STORE })));
+				const notes = notesOf(tree);
+				cleanup();
+				return notes;
+			};
+
+			// 官方现在这句话没提节假日 → 按高峰，而且一次日历都不用取。
+			let notes = await render({ schedule: schedule({}) });
+			assert.ok(notes.some((n) => n.text.includes("法定节假日按高峰")), `实际: ${JSON.stringify(notes)}`);
+
+			// 官方改口之后：说按空闲，并注明依据哪一年的放假安排。
+			notes = await render({
+				schedule: schedule({ holidays: "offpeak", calendar: { years: [2026], missing: [], error: null } })
+			});
+			const line = notes.find((n) => n.text.includes("法定节假日按空闲"));
+			assert.ok(line, `实际: ${JSON.stringify(notes)}`);
+			assert.ok(line.text.includes("依据 2026 年放假安排"), `要注明依据，实际: ${line.text}`);
+			assert.strictEqual(line.warn, false, "跟着官方页走就不该报警");
+
+			// 说好按空闲、日历却没取到：等于又变回按高峰算，必须看得见。
+			notes = await render({
+				schedule: schedule({ holidays: "offpeak", calendar: { years: [], missing: [2026], error: "network" } })
+			});
+			const failed = notes.find((n) => n.text.includes("放假安排取不到"));
+			assert.ok(failed?.warn, `日历没取到要报警，实际: ${JSON.stringify(notes)}`);
+		} finally {
+			cleanup();
+		}
+	});
+});
+
+test("定价页出现插件没读懂的计费规则时，把原文摆出来", async () => {
+	await withFixedNow(OFF_PEAK_ISO, async () => {
+		try {
+			const note = "高峰时段为北京时间周一至周五 9:00 - 12:00，单日费用封顶 100 元";
+			usagePayload = {
+				...EMPTY_USAGE,
+				pricingStatus: syncStatus({
+					schedule: {
+						days: [1, 2, 3, 4, 5], windows: [[540, 720]], source: "official",
+						offPeakDates: 0, peakDates: 0, holidays: "peak", holidaySource: "official",
+						note, unmodelled: true, calendar: null
+					}
+				})
+			};
+			const { mod, captured } = mount();
+			const tree = flatten(await mod.__render(() => captured["shell.overlay:balance-panel"].component({
+				t: tWith({ ...SYNC_T, "balance.price.unmodelled": "定价页这句话里有插件没读懂的计费规则，请核对：{note}" }),
+				store: OPEN_STORE
+			})));
+			const warn = notesOf(tree).find((n) => n.text.includes("没读懂"));
+			assert.ok(warn?.warn, `读不懂就得喊一声，不能装作规则没变，实际: ${JSON.stringify(notesOf(tree))}`);
+			assert.ok(warn.text.includes("封顶 100 元"), `要把原文摆出来，实际: ${warn.text}`);
+		} finally {
+			cleanup();
+		}
+	});
+});
+
+test("侧边栏的峰/谷角标跟着单价表里那套时段规则走", async () => {
+	// 周二 8:45 北京时间：官方规则（9:00 起）下是空闲，表里写着 8:30 起就是高峰。
+	await withFixedNow("2026-09-01T00:45:00.000Z", async () => {
+		try {
+			const withWindows = (windows) => ({
+				currency: "CNY",
+				peakMultiplier: 2,
+				peakSchedule: { days: [1, 2, 3, 4, 5], windows },
+				modelPricing: {
+					"deepseek-official:deepseek-v4-flash": {
+						cacheHitPerMillion: 0.05, cacheMissPerMillion: 1.5, outputPerMillion: 4.5,
+						peak: { cacheHitPerMillion: 0.1, cacheMissPerMillion: 3, outputPerMillion: 9 }
+					}
+				}
+			});
+			const badgeWith = async (windows) => {
+				const { mod, captured, t } = mount();
+				const pricing = withWindows(windows);
+				globalThis.fetch = (url) => (String(url).endsWith("/balance/pricing")
+					? Promise.resolve({ ok: true, json: async () => ({ ok: true, pricing }) })
+					: Promise.resolve({ ok: true, json: async () => ({ ...EMPTY_USAGE, pricing }) }));
+				const Button = captured["sidebar.footer.action:balance"].component;
+				const tree = flatten(await mod.__render(() => Button({ wide: true, t, store: { toggle() {} } })));
+				const badge = tree.find((n) => n.props?.className === "dsbSidePeak" || n.props?.className === "dsbSideOffpeak");
+				cleanup();
+				return badge?.props.className ?? null;
+			};
+
+			assert.strictEqual(await badgeWith([[540, 720]]), "dsbSideOffpeak", "9:00 起的规则下 8:45 该是「谷」");
+			assert.strictEqual(await badgeWith([[510, 720]]), "dsbSidePeak", "8:30 起的规则下 8:45 该是「峰」");
+		} finally {
+			cleanup();
+		}
+	});
+});
+
+test("单价表按每个模型自己那套峰价折算，不是全表乘一个倍率", async () => {
+	await withFixedNow(PEAK_ISO, async () => {
+		try {
+			const { mod, captured, t } = mount();
+			// 输出的峰价只加 50%，输入照旧翻倍——统一倍率算不出这张表。
+			const pricing = {
+				currency: "CNY",
+				peakMultiplier: 2,
+				modelPricing: {
+					"deepseek-official:deepseek-v4-flash": {
+						cacheHitPerMillion: 0.05, cacheMissPerMillion: 1.5, outputPerMillion: 9,
+						peak: { cacheHitPerMillion: 0.1, cacheMissPerMillion: 3, outputPerMillion: 13.5 }
+					}
+				}
+			};
+			globalThis.fetch = (url) => (String(url).endsWith("/balance/pricing")
+				? Promise.resolve({ ok: true, json: async () => ({ ok: true, pricing }) })
+				: Promise.resolve({ ok: true, json: async () => ({ ...EMPTY_USAGE, pricing }) }));
+			const Panel = captured["shell.overlay:balance-panel"].component;
+			const text = textOf(flatten(await mod.__render(() => Panel({ t, store: OPEN_STORE }))));
+			assert.ok(text.includes("13.5 元"), `输出该显示页面上那个峰价 13.5，实际: ${text.slice(-400)}`);
+			assert.ok(!text.includes("18 元"), "不能拿基准价 9 乘统一倍率 2 算成 18");
+			assert.ok(text.includes("3 元") && text.includes("0.1 元"), "输入两项的峰价也要按页面上的来");
+		} finally {
+			cleanup();
+		}
+	});
+});
+
+test("价表里没有峰价时（官方取消峰谷），侧边栏不再贴峰/谷角标", async () => {
+	await withFixedNow(PEAK_ISO, async () => {
+		try {
+			const { mod, captured, t } = mount();
+			const flat = {
+				currency: "CNY",
+				peakMultiplier: 1,
+				modelPricing: { "deepseek-official:deepseek-v4-flash": { cacheHitPerMillion: 0.05, cacheMissPerMillion: 1.5, outputPerMillion: 4.5 } }
+			};
+			globalThis.fetch = (url) => (String(url).endsWith("/balance/pricing")
+				? Promise.resolve({ ok: true, json: async () => ({ ok: true, pricing: flat }) })
+				: Promise.resolve({ ok: true, json: async () => ({ ...EMPTY_USAGE, pricing: flat }) }));
+			const Button = captured["sidebar.footer.action:balance"].component;
+			const tree = flatten(await mod.__render(() => Button({ wide: true, t, store: { toggle() {} } })));
+			assert.ok(!tree.some((n) => n.props?.className === "dsbSidePeak" || n.props?.className === "dsbSideOffpeak"),
+				"没有峰价就不该继续贴一个已经不存在的计费规则");
+
+			const Panel = captured["shell.overlay:balance-panel"].component;
+			const text = textOf(flatten(await mod.__render(() => Panel({ t, store: OPEN_STORE }))));
+			assert.ok(!text.includes("balance.price.period_note"), "单价那一节也不该再写「已按高峰时段折算」");
 		} finally {
 			cleanup();
 		}
