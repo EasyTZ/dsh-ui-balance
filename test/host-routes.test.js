@@ -700,3 +700,113 @@ test("usage 路由只收 GET，POST 一律 405", async () => {
 		assert.strictEqual(status, 405);
 	});
 });
+
+// ---------------------------------------------------------------------------
+// 计费路由：「访问 A 的请求按 B 的价格计费」
+// ---------------------------------------------------------------------------
+
+/** 北京时间 2026-09-14 12:00：官方公告里 deepseek-v4-pro 改按 Flash 价计费的那一刻。 */
+const PRO_ROUTE_FROM = Date.UTC(2026, 8, 14, 4, 0);
+/** 2026-09-12 周六 10:00 北京时间：分界点之前，且是周末（全天空闲），金额不掺峰谷。 */
+const BEFORE_ROUTE = Date.parse("2026-09-12T02:00:00.000Z");
+/** 2026-09-19 周六 10:00 北京时间：分界点之后，同样是周末。 */
+const AFTER_ROUTE = Date.parse("2026-09-19T02:00:00.000Z");
+
+const ROUTE_NOTE_OLD = "旧模型名 deepseek-v4-flash 仍可调用，但对应模型已下线，并按 Flash 价格计费";
+const ROUTE_NOTE_PRO = "北京时间 2026 年 9 月 14 日 12:00 之后，您访问 deepseek-v4-pro 的请求将全部路由到 V4.1 Flash，并按 V4.1 Flash 价格计费";
+
+/** 2026-09-10 那版价表：只剩 deepseek-flash 与 deepseek-v4-pro 两行，外加两条计费路由。 */
+const PRICING_ROUTED = {
+	currency: "CNY",
+	peakMultiplier: 2,
+	modelPricing: {
+		"deepseek-official:deepseek-flash": {
+			cacheHitPerMillion: 0.02,
+			cacheMissPerMillion: 1,
+			outputPerMillion: 4,
+			peak: { cacheHitPerMillion: 0.04, cacheMissPerMillion: 2, outputPerMillion: 8 }
+		},
+		"deepseek-official:deepseek-v4-pro": {
+			cacheHitPerMillion: 0.15,
+			cacheMissPerMillion: 4.5,
+			outputPerMillion: 13.5,
+			peak: { cacheHitPerMillion: 0.3, cacheMissPerMillion: 9, outputPerMillion: 27 }
+		}
+	},
+	billing: {
+		routes: [
+			{ model: "deepseek-v4-flash", billedAs: "deepseek-flash", from: null, note: ROUTE_NOTE_OLD },
+			{ model: "deepseek-v4-pro", billedAs: "deepseek-flash", from: PRO_ROUTE_FROM, note: ROUTE_NOTE_PRO }
+		],
+		unparsed: []
+	}
+};
+
+test("计费路由按每条消息自己的时刻套：分界点前 pro 按 Pro 价、之后按 Flash 价", async () => {
+	await withHome(async ({ home }) => {
+		await seedSessions(join(home, "sessions"), [
+			// 三条都是 1000 输出 token、都在周末（全天空闲），差别只在模型和时刻。
+			assistantFrame(BEFORE_ROUTE, "deepseek-v4-pro", { inputTokens: 0, outputTokens: 1000 }),
+			assistantFrame(AFTER_ROUTE, "deepseek-v4-pro", { inputTokens: 0, outputTokens: 1000 }),
+			assistantFrame(BEFORE_ROUTE, "deepseek-v4-flash", { inputTokens: 0, outputTokens: 1000 })
+		]);
+		await seedPricing(home, { pricing: PRICING_ROUTED });
+		await seedPricingHistory(home, [{ seenAt: OLD_SEEN, pricing: PRICING_ROUTED }]);
+		const routes = await mountHost({});
+		const { json } = await call(routes, `/api/dsdesktop/balance/usage?force=1`);
+
+		const cost = (model) => json.monthly.perModel.find((m) => m.model === model);
+		// pro：分界点前 1000 * 13.5 / 1e6 = 0.0135，之后 1000 * 4 / 1e6 = 0.004。
+		// 价表本身一张没换——分段完全来自脚注里那句话，所以这两条必须算出不同的钱。
+		assert.ok(Math.abs(cost("deepseek-v4-pro").cost - 0.0175) < 1e-12,
+			`pro 两条应分别按 Pro / Flash 价算，实际: ${cost("deepseek-v4-pro").cost}`);
+		// 旧模型名在新版价表里根本没有对应的行。不路由的话它会变成「未配置单价」、
+		// 金额直接算 0——用量表里有 token、费用表里没有钱。
+		assert.strictEqual(cost("deepseek-v4-flash").priced, true, "旧模型名不能落成「未配置单价」");
+		assert.ok(Math.abs(cost("deepseek-v4-flash").cost - 0.004) < 1e-12);
+		assert.ok(Math.abs(json.monthly.totalCost - 0.0215) < 1e-12, `实际总额: ${json.monthly.totalCost}`);
+		// 分界点在时间线上真的切了一刀：这个月用到了两段。
+		assert.deepStrictEqual(json.monthly.priceChanges, [OLD_SEEN, PRO_ROUTE_FROM]);
+	});
+});
+
+test("界面上要看得见路由：现在按谁计费、哪条还没生效", async () => {
+	await withHome(async ({ home }) => {
+		await seedPricing(home, { pricing: PRICING_ROUTED });
+		await seedPricingHistory(home, [{ seenAt: OLD_SEEN, pricing: PRICING_ROUTED }]);
+		const routes = await mountHost({});
+		const { json } = await call(routes, `/api/dsdesktop/balance/pricing`);
+
+		// 单价表里 deepseek-v4-flash 那一行是路由来的，得标出来——否则表里凭空多出
+		// 一行跟 flash 一模一样的价，看着像坏了。
+		assert.strictEqual(json.pricing.routedModels["deepseek-official:deepseek-v4-flash"], "deepseek-flash");
+		assert.deepStrictEqual(json.status.billing.routed, [
+			{ model: "deepseek-v4-flash", billedAs: "deepseek-flash", note: ROUTE_NOTE_OLD }
+		]);
+		// pro 那条还没到生效时刻：现在仍按 Pro 价摊在表上，但要预告一声。
+		assert.strictEqual(json.pricing.modelPricing["deepseek-official:deepseek-v4-pro"].outputPerMillion, 13.5);
+		assert.deepStrictEqual(json.status.billing.pending, [
+			{ model: "deepseek-v4-pro", billedAs: "deepseek-flash", from: PRO_ROUTE_FROM, note: ROUTE_NOTE_PRO }
+		]);
+		// 路由分界点不是「又抓到一张新价表」，别在界面上说成官方调价了。
+		assert.deepStrictEqual(json.status.pendingFrom, []);
+	});
+});
+
+test("读不懂的计费规则要摊到界面上，而且没有被套用", async () => {
+	await withHome(async ({ home }) => {
+		const pricing = {
+			...PRICING_ROUTED,
+			billing: { routes: [], unparsed: ["某月某日之后 deepseek-v4-pro 按 Flash 价格计费"] }
+		};
+		await seedPricing(home, { pricing });
+		await seedPricingHistory(home, [{ seenAt: OLD_SEEN, pricing }]);
+		const routes = await mountHost({});
+		const { json } = await call(routes, `/api/dsdesktop/balance/pricing`);
+
+		assert.deepStrictEqual(json.status.billing.unparsed, ["某月某日之后 deepseek-v4-pro 按 Flash 价格计费"]);
+		assert.deepStrictEqual(json.status.billing.routed, []);
+		assert.strictEqual(json.pricing.modelPricing["deepseek-official:deepseek-v4-pro"].outputPerMillion, 13.5,
+			"没读懂就不套用，金额按价表原价算");
+	});
+});

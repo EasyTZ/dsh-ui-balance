@@ -11,7 +11,7 @@
 
 import assert from "node:assert";
 import test from "node:test";
-import { parseOfficialPricing, parsePeakSchedule } from "../lib/index.js";
+import { applyBillingRoutes, parseBillingRoutes, parseOfficialPricing, parsePeakSchedule } from "../lib/index.js";
 
 /**
  * 2026-09-09 官方定价页上那张表，原样抄下来（含 rowspan/colspan 与 <br> 换行）。
@@ -212,4 +212,186 @@ test("新增模型会自动出现在价表里，不需要改代码", () => {
 	const pricing = parseOfficialPricing(html);
 	assert.ok(pricing?.modelPricing["deepseek-official:deepseek-v5-pro"], "页面上多一个模型就该多一条单价");
 	assert.strictEqual(pricing.modelPricing["deepseek-official:deepseek-v5-pro"].outputPerMillion, 18);
+});
+
+// ---------------------------------------------------------------------------
+// 2026-09-10 那次改版：模型改名 + 计费路由
+// ---------------------------------------------------------------------------
+
+/**
+ * 2026-09-10 官方定价页上那张表，原样抄下来。
+ *
+ * 跟上面那张 2026-09-09 的差别不只是价：**模型名那一格里多了脚注角标**
+ * （`deepseek-flash<sup>(1)</sup>`）。这一处足以让整份表判成解析失败——而失败是
+ * 安静的，插件会继续按早就下线的 V4 Flash 的价算钱。所以这张表必须留在测试里。
+ */
+const REAL_TABLE_0910 = `<table style="text-align:center"><tr><td colspan="3" style="text-align:center">模型</td><td>deepseek-flash<sup>(1)</sup></td><td>deepseek-v4-pro<sup>(2)</sup></td></tr><tr><td colspan="3">BASE URL (OpenAI 格式)</td><td colspan="2"><a href="https://api.deepseek.com" target="_blank" rel="noopener noreferrer">https://api.deepseek.com</a></td></tr><tr><td colspan="3">BASE URL (Anthropic 格式)</td><td colspan="2"><a href="https://api.deepseek.com/anthropic" target="_blank" rel="noopener noreferrer">https://api.deepseek.com/anthropic</a></td></tr><tr><td colspan="3" style="text-align:center">模型版本</td><td>DeepSeek-V4.1-Flash</td><td>DeepSeek-V4-Pro-0813</td></tr><tr><td colspan="3">思考模式</td><td colspan="2">支持非思考与思考模式（默认）<br>切换方式详见<a href="/zh-cn/guides/thinking_mode">思考模式</a></td></tr><tr><td colspan="3">上下文长度</td><td colspan="2">1M</td></tr><tr><td colspan="3">输出长度</td><td colspan="2">最大 384K</td></tr><tr><td rowspan="7">功能</td><td colspan="2"><a href="/zh-cn/guides/json_mode">Json Output</a></td><td>支持</td><td>支持</td></tr><tr><td colspan="2"><a href="/zh-cn/guides/tool_calls">Tool Calls</a></td><td>支持</td><td>支持</td></tr><tr><td colspan="2"><a href="/zh-cn/guides/responses_api">Responses API</a></td><td>支持</td><td>支持</td></tr><tr><td colspan="2"><a href="/zh-cn/guides/anthropic_api">Anthropic API</a></td><td>支持</td><td>支持</td></tr><tr><td colspan="2"><a href="/zh-cn/guides/chat_prefix_completion">对话前缀续写（Beta）</a></td><td>支持</td><td>支持</td></tr><tr><td colspan="2"><a href="/zh-cn/guides/fim_completion">FIM 补全（Beta）</a></td><td>仅非思考模式支持</td><td>仅非思考模式支持</td></tr><tr><td colspan="2"><a href="/zh-cn/guides/vision">图像理解</a></td><td>支持</td><td>不支持</td></tr><tr><td rowspan="6">价格<sup>(3)</sup></td><td rowspan="2">百万tokens输入<br>（缓存命中）</td><td>空闲时段</td><td>0.02元</td><td>0.15元</td></tr><tr><td>高峰时段</td><td>0.04元</td><td>0.30元</td></tr><tr><td rowspan="2">百万tokens输入<br>（缓存未命中）</td><td>空闲时段</td><td>1元</td><td>4.5元</td></tr><tr><td>高峰时段</td><td>2元</td><td>9.0元</td></tr><tr><td rowspan="2">百万tokens输出</td><td>空闲时段</td><td>4元</td><td>13.5元</td></tr><tr><td>高峰时段</td><td>8元</td><td>27.0元</td></tr><tr><td colspan="3">并发限制<sup>(4)</sup></td><td>2500</td><td>500</td></tr></table>`;
+
+/** 同一版页面的脚注，原样抄下来：(1)(2) 是计费路由，(3) 是峰谷时段。 */
+const REAL_FOOTNOTES_0910 = `<div style="font-size:14px"><p>(1) 模型名请使用 <code>deepseek-flash</code>。旧模型名 <code>deepseek-v4-flash</code>、<code>deepseek-v4-flash-vision-exp</code> 仍可调用，但对应模型已下线，请求将由 DeepSeek-V4.1-Flash 模型提供服务，并按 Flash 价格计费。</p><p>(2) 经多方测试，V4.1 Flash 在性能、费用、速度、总用时等各项指标上已全面超越 V4 Pro，因此我们计划有序下线 V4 Pro。北京时间 2026 年 9 月 14 日 12:00 之后，至未来 V4.1 Pro 上线之前，您访问 <code>deepseek-v4-pro</code> 的请求将全部路由到 V4.1 Flash，并按 V4.1 Flash 价格计费。</p><p>(3) 空闲时段价格为高峰时段价格的一半。高峰时段为北京时间周一至周五 9:00 - 12:00、14:00 - 18:00（其余为空闲时段）。</p><p>(4) 更多并发限制细节，请参考<a href="/zh-cn/quick_start/rate_limit">限速与隔离</a>。</p></div>`;
+
+const REAL_PAGE_0910 = wrap(REAL_TABLE_0910 + REAL_FOOTNOTES_0910);
+
+/** 北京时间 2026-09-14 12:00，公告里 pro 改按 flash 计费的那一刻。 */
+const PRO_ROUTE_FROM = Date.UTC(2026, 8, 14, 4, 0);
+
+test("模型名那一格里的脚注角标不能把整份表读废", () => {
+	const pricing = parseOfficialPricing(REAL_PAGE_0910);
+	assert.ok(pricing, "页面给模型名加个 <sup>(1)</sup> 不该让同步整份失败");
+	assert.deepStrictEqual(Object.keys(pricing.modelPricing), [
+		"deepseek-official:deepseek-flash",
+		"deepseek-official:deepseek-v4-pro"
+	]);
+	assert.deepStrictEqual(pricing.modelPricing["deepseek-official:deepseek-flash"], {
+		cacheHitPerMillion: 0.02,
+		cacheMissPerMillion: 1,
+		outputPerMillion: 4,
+		peak: { cacheHitPerMillion: 0.04, cacheMissPerMillion: 2, outputPerMillion: 8 }
+	});
+	// 峰谷脚注还在同一版页面上，别被前面两条脚注挤掉。
+	assert.deepStrictEqual(pricing.peakSchedule.days, [1, 2, 3, 4, 5]);
+	assert.deepStrictEqual(pricing.peakSchedule.windows, [[540, 720], [840, 1080]]);
+});
+
+test("脚注里的计费路由读得出来：旧模型名按 flash 计费，pro 从 9/14 12:00 起按 flash 计费", () => {
+	const pricing = parseOfficialPricing(REAL_PAGE_0910);
+	assert.deepStrictEqual(pricing.billing.unparsed, [], "这一版页面上没有读不懂的计费规则");
+	assert.deepStrictEqual(
+		pricing.billing.routes.map((route) => [route.model, route.billedAs, route.from]),
+		[
+			["deepseek-v4-flash", "deepseek-flash", null],
+			["deepseek-v4-flash-vision-exp", "deepseek-flash", null],
+			["deepseek-v4-pro", "deepseek-flash", PRO_ROUTE_FROM]
+		]
+	);
+	// 原文要留着：界面上得能读到插件照的是哪句话。
+	assert.match(pricing.billing.routes[2].note, /2026 年 9 月 14 日 12:00/);
+	// 「DeepSeek-V4.1-Flash」是模型版本号、不是能拿去调用的模型名，不能被当成路由目标。
+	assert.ok(pricing.billing.routes.every((route) => route.billedAs === "deepseek-flash"));
+});
+
+test("路由按每条消息自己的时刻套：9/14 12:00 之前 pro 还是 Pro 价，之后才是 Flash 价", () => {
+	const pricing = parseOfficialPricing(REAL_PAGE_0910);
+	const flash = pricing.modelPricing["deepseek-official:deepseek-flash"];
+
+	const before = applyBillingRoutes(pricing, PRO_ROUTE_FROM - 1);
+	assert.deepStrictEqual(
+		before.modelPricing["deepseek-official:deepseek-v4-pro"],
+		pricing.modelPricing["deepseek-official:deepseek-v4-pro"],
+		"分界点之前 pro 按价表上的 Pro 价，一分不能少算"
+	);
+	// 旧模型名那两条没有生效时刻，任何时候都算数——否则它们在新版价表里根本没有
+	// 对应的行，那批用量会变成「未配置单价」、金额直接算 0。
+	assert.deepStrictEqual(before.modelPricing["deepseek-official:deepseek-v4-flash"], flash);
+	assert.deepStrictEqual(before.modelPricing["deepseek-official:deepseek-v4-flash-vision-exp"], flash);
+	assert.strictEqual(before.routedModels["deepseek-official:deepseek-v4-pro"], undefined);
+
+	const after = applyBillingRoutes(pricing, PRO_ROUTE_FROM);
+	assert.deepStrictEqual(after.modelPricing["deepseek-official:deepseek-v4-pro"], flash, "分界点当刻就该按 Flash 价");
+	assert.strictEqual(after.routedModels["deepseek-official:deepseek-v4-pro"], "deepseek-flash");
+	// 峰价也跟着走：路由过去的是整份单价，不是只有空闲那三项。
+	assert.strictEqual(after.modelPricing["deepseek-official:deepseek-v4-pro"].peak.outputPerMillion, 8);
+	// 原表不能被改：时间线上每一段都从同一份原始价表算起。
+	assert.strictEqual(pricing.modelPricing["deepseek-official:deepseek-v4-pro"].outputPerMillion, 13.5);
+});
+
+test("「按 Flash 价格计费」在一张没有 deepseek-flash 的表上不能猜到别的模型头上", () => {
+	// 2026-09-09 那张表上只有 deepseek-v4-flash。按后缀猜的话「Flash」会落到它头上，
+	// 那是一次看不出来的错价——所以宁可整条读不懂，把原句交给界面。
+	const old = parseOfficialPricing(wrap(REAL_TABLE + REAL_FOOTNOTES_0910));
+	assert.deepStrictEqual(old.billing.routes, []);
+	assert.strictEqual(old.billing.unparsed.length, 2, "两条脚注都该原样留下来给人看");
+	const routed = applyBillingRoutes(old, PRO_ROUTE_FROM + 1);
+	assert.strictEqual(routed.modelPricing["deepseek-official:deepseek-v4-flash"].outputPerMillion, 4.5);
+	assert.strictEqual(routed.modelPricing["deepseek-official:deepseek-v4-pro"].outputPerMillion, 13.5);
+	assert.strictEqual(routed.routedModels, undefined, "一条都没套上就别在界面上标路由");
+});
+
+test("翻旧账时老价表不受影响：目标模型不在那张表里就跳过这条规则", () => {
+	// 价格时间线上每一张历史价表都会被套一遍路由。老表上根本没有目标模型那一行时，
+	// 当时的用量就该按它自己那份价算——正是当时的实情，不能拿今天的规则改写。
+	const old = {
+		currency: "CNY",
+		modelPricing: {
+			"deepseek-official:deepseek-v4-flash": { cacheHitPerMillion: 0.05, cacheMissPerMillion: 1.5, outputPerMillion: 4.5 }
+		},
+		billing: { routes: [{ model: "deepseek-v4-flash", billedAs: "deepseek-flash", from: null, note: "" }], unparsed: [] }
+	};
+	const routed = applyBillingRoutes(old, PRO_ROUTE_FROM + 1);
+	assert.strictEqual(routed.modelPricing["deepseek-official:deepseek-v4-flash"].outputPerMillion, 4.5);
+	assert.strictEqual(routed.routedModels, undefined);
+});
+
+test("读不懂的计费规则一律不套用，但要把原文交出来", () => {
+	const models = ["deepseek-flash", "deepseek-v4-pro"];
+
+	// 有时间界限却读不出来（写成了「9月14日中午」）：套用与否两个方向都是错的，
+	// 那就不套用、把原话摆出来让人判。
+	const vague = parseBillingRoutes(
+		"<p>9月14日中午之后，访问 deepseek-v4-pro 的请求将全部路由到 V4.1 Flash，并按 V4.1 Flash 价格计费。</p>",
+		models
+	);
+	assert.deepStrictEqual(vague.routes, []);
+	assert.strictEqual(vague.unparsed.length, 1);
+
+	// 「Flash」这个口语称呼在表上找不到逐字对得上的模型名：不猜，当读不懂。
+	const ambiguous = parseBillingRoutes(
+		"<p>旧模型名 deepseek-v4-flash-vision-exp 已下线，并按 Flash 价格计费。</p>",
+		["deepseek-v4-flash", "deepseek-v5-flash"]
+	);
+	assert.deepStrictEqual(ambiguous.routes, []);
+	assert.strictEqual(ambiguous.unparsed.length, 1);
+
+	// 日期不是「生效时刻」的那种句子，不能被当成分界点。
+	const announced = parseBillingRoutes(
+		"<p>北京时间 2026 年 9 月 14 日 12:00 发布公告，deepseek-v4-pro 将路由到 V4.1 Flash 并按 Flash 价格计费。</p>",
+		models
+	);
+	assert.deepStrictEqual(announced.routes, []);
+});
+
+test("只是提到「计费」的句子不能被当成计费路由", () => {
+	const html = "<p>扣减费用 = token 消耗量 × 模型单价，对应的费用将直接从充值余额或赠送余额中进行扣减。</p>"
+		+ "<p>产品价格可能发生变动，DeepSeek 保留修改价格的权利。</p>";
+	const parsed = parseBillingRoutes(html, ["deepseek-flash"]);
+	assert.deepStrictEqual(parsed.routes, []);
+	assert.deepStrictEqual(parsed.unparsed, []);
+});
+
+test("官方撤掉那条脚注（V4.1 Pro 上线）之后，pro 自动回到按价表算，不用改代码", () => {
+	const withoutRoute = parseOfficialPricing(wrap(
+		REAL_TABLE_0910
+		+ "<p>(3) 高峰时段为北京时间周一至周五 9:00 - 12:00、14:00 - 18:00（其余为空闲时段）。</p>"
+	));
+	assert.strictEqual(withoutRoute.billing, undefined, "没有规则就别带这个字段，免得指纹凭空变一次");
+	const routed = applyBillingRoutes(withoutRoute, PRO_ROUTE_FROM + 86400000);
+	assert.strictEqual(routed.modelPricing["deepseek-official:deepseek-v4-pro"].outputPerMillion, 13.5);
+});
+
+test("规则只认它自己那句话点名的模型，不会把价格表那一列名字收进来", () => {
+	// 脱完标签之后，`</table>` 和 `<p>` 两边的文字会挤成一句——表格里排着的那一列
+	// 模型名于是全都落在「按 Flash 价格计费」这句话里。真发生过：`deepseek-v4-pro`
+	// 被一起路由走，pro 的调用从此按 Flash 价算，而面板一个字都不会说。
+	const html = `<table><tr><td>模型</td><td>deepseek-flash</td><td>deepseek-v4-pro</td></tr></table>`
+		+ `<p>(1) 旧模型名 deepseek-v4-flash 已下线，并按 Flash 价格计费。</p>`;
+	const parsed = parseBillingRoutes(html, ["deepseek-flash", "deepseek-v4-pro"]);
+	assert.deepStrictEqual(parsed.routes.map((route) => route.model), ["deepseek-v4-flash"]);
+});
+
+test("带起止的规则（A 之后至 B 之前）不套用：只建模了「起」，认下来会一直套到天荒地老", () => {
+	const parsed = parseBillingRoutes(
+		"<p>北京时间 2026 年 9 月 14 日 12:00 之后至北京时间 2026 年 11 月 1 日 00:00 之前，"
+		+ "您访问 deepseek-v4-pro 的请求将路由到 V4.1 Flash，并按 V4.1 Flash 价格计费。</p>",
+		["deepseek-flash", "deepseek-v4-pro"]
+	);
+	assert.deepStrictEqual(parsed.routes, []);
+	assert.strictEqual(parsed.unparsed.length, 1, "读不懂也要把原句交出来");
+});
+
+test("「按 X 计费」少了「价格」两个字也认——目标必须逐字对上表里的模型名，这层就是防线", () => {
+	const parsed = parseBillingRoutes(
+		"<p>北京时间 2026 年 9 月 14 日 12:00 之后，deepseek-v4-pro 的请求将路由到 V4.1 Flash，并按 Flash 模型计费。</p>",
+		["deepseek-flash", "deepseek-v4-pro"]
+	);
+	assert.deepStrictEqual(parsed.routes.map((route) => [route.model, route.billedAs]), [["deepseek-v4-pro", "deepseek-flash"]]);
 });
