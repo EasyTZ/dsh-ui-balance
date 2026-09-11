@@ -54,11 +54,11 @@ function framesOf(events) {
 	return Buffer.concat(events.map((e) => zstdCompressSync(Buffer.from(JSON.stringify(e) + "\n", "utf8"))));
 }
 
-async function makeSession(root, project, id, events) {
+async function makeSession(root, project, id, events, filename = "session.jsonl.zstd") {
 	const dir = join(root, project, id);
 	await mkdir(dir, { recursive: true });
-	await writeFile(join(dir, "session.jsonl.zstd"), framesOf(events));
-	return join(dir, "session.jsonl.zstd");
+	await writeFile(join(dir, filename), framesOf(events));
+	return join(dir, filename);
 }
 
 async function withTempRoot(fn) {
@@ -108,6 +108,34 @@ test("扫描抽出每条 assistant 消息的精确用量与逐条精确的模型
 		assert.ok(Math.abs(pro.cost - (10 * 4.5 + 30 * 0.15 + 20 * 13.5) / 1e6) < 1e-12);
 		assert.ok(Math.abs(agg.totalCost - (flash.cost + pro.cost)) < 1e-12);
 	});
+});
+
+test("新内核的 session.v3 日志要读；旧 v0 与 v3 同时存在时只读新世代，不重复计费", async () => {
+  await withTempRoot(async (root) => {
+    const oldEvents = [
+      { type: "session", version: 1, id: "session-1" },
+      assistantEvent(OFF_PEAK, "deepseek-v4-flash", { inputTokens: 1, outputTokens: 1 }),
+      assistantEvent(OFF_PEAK + 1, "deepseek-v4-flash", { inputTokens: 2, outputTokens: 2 })
+    ];
+    await makeSession(root, "--proj-a--", "session-1", oldEvents, "session.jsonl.zstd");
+    // 真实迁移会保留旧 v0，同时写一份包含全部历史的 v3；新事件只追加到 v3。
+    await makeSession(root, "--proj-a--", "session-1", [
+      ...oldEvents,
+      assistantEvent(OFF_PEAK + 2, "deepseek-v4-flash", { inputTokens: 3, outputTokens: 3 })
+    ], "session.v3.jsonl.zstd");
+    await makeSession(root, "--proj-b--", "session-2", [
+      { type: "session", version: 1, id: "session-2" },
+      assistantEvent(OFF_PEAK + 3, "deepseek-v4-pro", { inputTokens: 4, outputTokens: 4 })
+    ], "session.v3.jsonl.zstd");
+
+    const { records } = await scanUsage(root, null, OFF_PEAK);
+    assert.deepStrictEqual([...records].sort((a, b) => a[0] - b[0]), [
+      [OFF_PEAK, "deepseek-official:deepseek-v4-flash", 1, 0, 1],
+      [OFF_PEAK + 1, "deepseek-official:deepseek-v4-flash", 2, 0, 2],
+      [OFF_PEAK + 2, "deepseek-official:deepseek-v4-flash", 3, 0, 3],
+      [OFF_PEAK + 3, "deepseek-official:deepseek-v4-pro", 4, 0, 4]
+    ]);
+  });
 });
 
 test("增量扫描能跨「写了一半的帧」恢复，结果与全量扫描逐字相同", async () => {
